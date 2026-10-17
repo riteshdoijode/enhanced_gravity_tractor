@@ -22,6 +22,7 @@ PLANETS = {  # name: (display radius AU, color, orbital period days)
     "jupiter_bary": (0.040, "#c9a27a", 4332.6),
 }
 BENNU_PERIOD_D = 436.65
+TRACTOR_COLOR = "#3987e5"  # the tractor's plan: the same blue as its launch window on the distance plot
 CAMERA_START = (0.3, -3.6, 2.5)  # AU from the barycenter, ecliptic north up
 GALACTIC_SLOW = 50.0  # display option: the Galactic motion slowed x1/50 so the planets' helices show
 PATH_YEARS = 4332.6 / 365.25  # traced paths: one orbit of Jupiter behind and ahead
@@ -34,6 +35,8 @@ def ecl(P):
 
 
 class SolarScene(SceneBase):
+    SKY_FRAME = EQ_TO_ECL  # the scene is in ecliptic axes
+
     def __init__(self, plotter, eph):
         super().__init__(plotter)
         import pyvista as pv
@@ -210,7 +213,7 @@ class SolarScene(SceneBase):
     def set_plan(self, res):
         plan = {}
         if res is not None and res.tractor.feasible and res.tractor.path is not None:
-            plan["tractor"] = (res.tractor.path_t, res.tractor.path, "#199e70", "Gravity tractor (plan)")
+            plan["tractor"] = (res.tractor.path_t, res.tractor.path, TRACTOR_COLOR, "Gravity tractor (plan)")
         if res is not None and res.impactor.feasible and res.impactor.path is not None:
             plan["impactor"] = (res.impactor.path_t, res.impactor.path, "#d95926", f"DART #{res.impactor.number} (plan)")
         self.plan = plan

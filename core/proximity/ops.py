@@ -13,6 +13,10 @@ After the cruise hand-over (< 100 km), in the Bennu-centered frame with ICRF axe
     transfer  -> radial climb + arc to the gravity-tractor station (inertial frame)
     station   -> hover at distance d along the tow direction with the plume-cone thrust constraint; the
                  tow itself is Step 7
+    release   -> end of the tow: the boulder is let go (it stays at the release point), the craft holds there
+                 with its own mass while the arm stows
+    depart    -> radial climb to DEPART_RADIUS, then a small departure burn
+    departed  -> coasting away from Bennu; the proximity operations are over
 Truth: RK4 with polyhedron gravity (rotating with Bennu), solar tide, solar pressure with Bennu's shadow
 and thrust execution errors. Navigation: EKF on LIDAR range + camera bearing (core/proximity/ekf.py).
 Controllers act on the *estimate*. The stand-off hold always uses LQR (no constraint can become active
@@ -41,10 +45,14 @@ LIFT_MARGIN = 1.3  # required thrust / weight of spacecraft + boulder at the sit
 WAIT_FOR_THRUST = 14 * 86400.0
 PHASE_DT = {  # control period [s] per phase (truth integrates 3 RK4 steps per period)
     "approach": 300.0, "standoff": 1800.0, "survey": 60.0, "descent": 20.0, "ascent": 20.0,
-    "transfer": 30.0, "station": 60.0, "parked": 600.0,
+    "transfer": 30.0, "station": 60.0, "parked": 600.0, "release": 60.0, "depart": 30.0, "departed": 3600.0,
 }
-BANDWIDTH = {"parked": 5e-4, "standoff": 2e-4, "survey": 3e-3, "descent": 6e-3, "ascent": 6e-3, "transfer": 4e-3, "station": 3e-3}
+BANDWIDTH = {"parked": 5e-4, "standoff": 2e-4, "survey": 3e-3, "descent": 6e-3, "ascent": 6e-3, "transfer": 4e-3,
+             "station": 3e-3, "release": 3e-3, "depart": 4e-3}
 HOLD_DETAIL_S = 86400.0  # s on station flown with the closed-loop controller before the averaged tow model
+RELEASE_HOLD_S = 1800.0  # s the craft holds at the release point after letting the boulder go
+DEPART_RADIUS = 50e3  # m: the departure climbs to here (where the pull on Bennu no longer counts), then burns
+DEPART_DV = 0.5  # m/s radial departure burn: the craft leaves Bennu's neighbourhood (escape speed there ~1.4 cm/s)
 
 
 def _min_jerk(s):
@@ -121,6 +129,8 @@ class ProximityOps:
         self.boulder_rest = None
         if self.capture is not None:  # boulder at rest on the surface (site frame) until captured
             self.boulder_rest = [g for g in self.capture.poses() if g[0] == "boulder"][0]
+        self.boulder_free = None  # the boulder after its release: (geom, inertial position, rotation), fixed
+        self.t_release = self.t_departed = np.nan
         self.t_station = np.nan
         self.impulses_seen = len(mission.bennu_impulses)
         self.beta_est = None
@@ -245,7 +255,9 @@ class ProximityOps:
 
     def _after_safe_mode(self):
         """Thrusters back after a storm: the craft has drifted (it was co-rotating or hovering on thrust).
-        Anything that is not a simple hold restarts from a fresh approach."""
+        Anything that is not a simple hold restarts from a fresh approach (not the departure: it goes on)."""
+        if self.phase in ("release", "depart", "departed"):
+            return
         p = self.ekf.x[:3]
         R = bennu_attitude(self.t)
         refs = {"standoff": getattr(self, "hold", ("inertial", p))[1], "survey": R @ self.survey_body,
@@ -273,10 +285,13 @@ class ProximityOps:
             if self._was_safe and not safe:
                 self._after_safe_mode()
             self._was_safe = safe
+            if self.phase == "departed":
+                self._departed_fast(t1)
+                continue
             if self._averaged_hold():
                 self._hold_fast(t1)
                 continue
-            if self.phase == "transfer" and getattr(self, "_tow_averaged", False):
+            if self.phase in ("transfer", "depart") and getattr(self, "_tow_averaged", False):
                 self._transfer_fast(t1)
                 continue
             if getattr(self, "_fast_was", False):  # back to the detailed loop: fresh filter at the hold point
@@ -466,7 +481,7 @@ class ProximityOps:
         d = np.linalg.norm(p0)
         e = p0 / d
         G = BENNU["gm"] / d**3 * (3 * np.outer(e, e) - np.eye(3))
-        key = (phase, round(d, -1) if phase != "transfer" else round(self.t / 600.0))
+        key = (phase, round(d, -1) if phase not in ("transfer", "depart") else round(self.t / 600.0))
         ctrl = self._controller(key, lambda: self._make(*relative_model(G, dt), phase, gamma=gamma, keepout=keepout))
         N = getattr(ctrl, "N", 1)
         ts = self.t + dt * np.arange(N)
@@ -519,9 +534,9 @@ class ProximityOps:
         """Averaged transfer between hold points once the tow runs on the averaged model: the craft follows its
         reference path (the closed-loop tracking of Step 5 holds it there); thrust = the reference acceleration
         minus the environment, propellant integrated. In safe mode the transfer waits."""
-        while self.t < t1 - 1e-6 and self.phase == "transfer":
+        while self.t < t1 - 1e-6 and self.phase in ("transfer", "depart"):
             if self.t - self.phase_t0 >= self.transfer_T:
-                self._ctl_transfer()  # arrival: station or parked
+                self._ctl_transfer()  # arrival: station, parked or departed
                 return
             h = 300.0
             if self.m.safe_mode(self.t):
@@ -575,11 +590,80 @@ class ProximityOps:
                     self.t_station = self.t
                 self._set_phase("station", f"On station {self.d_station:,.0f} m from Bennu's center along the tow "
                                            f"direction: the gravity tractor is towing ({self.mass / 1e3:,.1f} t)", "good")
+            elif then == "departed":
+                self._departed()
+                return
             else:
                 self._set_phase("parked", f"Parked {D_PARK / 1e3:.0f} km from Bennu (tow off)")
             getattr(self, f"_ctl_{self.phase}")()
             return
-        self._track_inertial("transfer", self._transfer_ref)
+        self._track_inertial(self.phase, self._transfer_ref)
+
+    _ctl_depart = _ctl_transfer
+
+    # ---- end of the tow: release the boulder, depart
+    def release(self):
+        """End of the tow (core/mission.py end_tow): the boulder is let go where the craft is (it stays there as a
+        marker: at 5 km from Bennu it drifts for months), the mass properties revert to the bare spacecraft and the
+        craft holds the point for RELEASE_HOLD_S while the arm stows, then departs. True if it could release."""
+        if self.phase not in ("station", "parked", "transfer"):
+            return False
+        had = self.has_boulder
+        if had:
+            shape = {g[0]: g for g in self.sc_shape}
+            n, ty, sz, rgba, p_b, R_b = shape["boulder"]  # bus frame -> Bennu-centered inertial
+            Rsc = self.attitude()
+            self.boulder_free = ((n, ty, sz, rgba), self.x[:3] + Rsc @ p_b, Rsc @ R_b)
+            self.has_boulder = False
+            self.sc_shape = self.capture.craft_shape(False)
+            self.m_boulder = 0.0
+        self.t_release = self.t
+        self.hold = ("inertial", self.x[:3].copy())
+        self._fast_was = True  # the release hold is flown with the closed loop: fresh filter at the hold point
+        self._set_phase("release", (f"Boulder released {np.linalg.norm(self.x[:3]) / 1e3:.1f} km from Bennu: the "
+                                    f"spacecraft is {self.m_sc / 1e3:,.1f} t again" if had else
+                                    "End of the tow: the spacecraft prepares to leave Bennu"), "good")
+        return True
+
+    def _ctl_release(self):
+        if self.t - self.phase_t0 >= RELEASE_HOLD_S:
+            self._tow_averaged = True  # the days-long climb follows its reference path (as the averaged transfers do)
+            self._start_transfer(DEPART_RADIUS, self.e_station, then="departed", phase="depart")
+            return
+        p_hold = self.hold[1]
+        self._track_inertial("release", lambda t: (p_hold, np.zeros(3), np.zeros(3)), keepout=False)
+
+    def _departed(self):
+        """At DEPART_RADIUS: a small radial burn, then the craft coasts away (no more station-keeping)."""
+        u = self.x[:3] / np.linalg.norm(self.x[:3])
+        self.x[3:] = DEPART_DV * u  # the burn leaves it receding radially (the transfer ended at rest)
+        self.ekf.x[:6] = self.x
+        self.tr.dv_used += DEPART_DV
+        self.tr.prop_used += self.mass * DEPART_DV / (self.m.p.tractor_isp_s * G0)
+        self.u = np.zeros(3)
+        self.t_departed = self.t
+        self._set_phase("departed", f"Departure burn {DEPART_DV:g} m/s at {np.linalg.norm(self.x[:3]) / 1e3:.0f} km: "
+                                    "the gravity tractor leaves Bennu", "good")
+
+    def _ctl_departed(self):
+        self.u = np.zeros(3)
+
+    def _departed_fast(self, t1):
+        """Coasting away after the departure burn: a straight line relative to Bennu (its gravity at > 50 km with
+        0.5 m/s is negligible), no thrust; daily samples for the plots."""
+        while self.t < t1 - 1e-6:
+            h = min(86400.0, t1 - self.t)
+            self.x[:3] += self.x[3:] * h
+            self.t += h
+            self.ekf.x[:6] = self.x
+            if not self.trail or self.t - self.trail[-1][0] >= 86400.0:
+                self.trail.append((self.t, self.x[:3].copy()))
+                self.trail = self.trail[-3000:]
+            H = self.hist
+            for k, v in (("t", self.t), ("alt", np.linalg.norm(self.x[:3]) - BENNU["radius"]), ("nav_err", np.nan),
+                         ("nav_sigma", np.nan), ("thrust", 0.0), ("a_max", self.tr.thrust), ("phase", self.phase),
+                         ("nis", np.nan)):
+                H[k].append(v)
 
     def _transfer_ref(self, t):
         """Radial climb to the station radius while rotating the direction toward the tow axis."""
@@ -777,9 +861,11 @@ class ProximityOps:
             return
         self._track_body("ascent", self._ascent_ref)
 
-    def _start_transfer(self, d=None, e=None, then="station"):
+    def _start_transfer(self, d=None, e=None, then="station", phase="transfer"):
         if e is None and then == "station" and self.m.trim is None and len(self.m.bennu_impulses) and hasattr(self.m, "tow_direction_now"):
-            self.e_station = self.m.tow_direction_now(self.t)  # first station: already along the trim law
+            e_trim = self.m.tow_direction_now(self.t)  # first station: already along the trim law
+            if e_trim is not None:
+                self.e_station = e_trim
         d = self.d_station if d is None else d
         e = self.e_station if e is None else e
         self.tr_target = (d, e, then)
@@ -794,6 +880,10 @@ class ProximityOps:
         path = abs(d - self.tr_r0) + self.tr_theta * max(d, self.tr_r0)
         self.transfer_T = max(1.875 * path / 0.2, 3600.0)
         # the start velocity is the co-rotating one; the first minutes of tracking absorb it
+        if phase == "depart":
+            self._set_phase("depart", f"Departure: radial climb from {self.tr_r0 / 1e3:.1f} km to {d / 1e3:.0f} km, "
+                                      f"{self.transfer_T / 86400:.1f} days")
+            return
         where = "the tractor station" if then == "station" else f"the {D_PARK / 1e3:.0f} km parking point"
         self._set_phase("transfer", f"Transfer to {where}: {np.degrees(self.tr_theta):.0f}° around Bennu, "
                                     f"{self.transfer_T / 3600:.1f} h")
@@ -811,7 +901,8 @@ class ProximityOps:
             "trail": np.array([p for _, p in self.trail[-600:]]) if len(self.trail) > 1 else None,
             "hist": {k: np.asarray(v[-400:]) for k, v in self.hist.items() if k != "phase"},
             "station": self.d_station * self.e_station, "t_station": self.t_station,
-            "mpc_fallbacks": self.mpc_fallbacks,
+            "mpc_fallbacks": self.mpc_fallbacks, "t_release": self.t_release, "t_departed": self.t_departed,
+            "boulder_free": None if self.boulder_free is None else self.boulder_free[1].copy(),
         }
         Rs, o = self.env.site_R, self.site_body
         to_i = lambda p, Rm: (R @ (o + Rs @ p), R @ Rs @ Rm)  # site frame -> Bennu-centered ICRF
@@ -826,6 +917,9 @@ class ProximityOps:
             if self.boulder_rest is not None:
                 n, ty, sz, rgba, p, Rm = self.boulder_rest
                 s["geoms"].append((n, ty, sz, rgba, *to_i(p, Rm)))
+            if self.boulder_free is not None:  # the released boulder, left where it was let go
+                (n, ty, sz, rgba), p, Rm = self.boulder_free
+                s["geoms"].append((n, ty, sz, rgba, p, Rm))
         s["boulder_mesh"] = self.boulder_mesh
         s["boresight_target"] = R @ self.site_body if self.phase in ("survey", "descent", "ascent") else np.zeros(3)
         s["site"] = R @ self.site_body

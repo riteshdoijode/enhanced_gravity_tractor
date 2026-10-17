@@ -13,11 +13,11 @@ a time) and then the gravity tractor must push that flyby out to at least the Mo
 
 ```bash
 uv sync                                   # Python 3.12 + dependencies
-uv run python -m scripts.fetch_data       # JPL ephemerides, SBDB, NASA 3D models (~145 MB, ~3 min)
+uv run python -m scripts.fetch_data       # JPL ephemerides, SBDB, NASA 3D models, star sky (~150 MB, ~3 min)
 uv run python -m scripts.fit_bennu        # estimate Bennu's Yarkovsky/SRP parameters vs JPL (~45 s)
 uv run python -m scripts.precompute       # Bennu nominal orbit + state-transition matrix 2026-2185 (~100 s)
 uv run python -m scripts.make_scenario    # keyhole scenario: 2135 keyhole -> 2182 impact (~2 min; --rescan ~12 min)
-uv run pytest                             # validation suite (102 tests), 6 parallel workers (~8 min)
+uv run pytest                             # validation suite (130 tests), 6 parallel workers (~6 min)
 uv run python -m app.main                 # the simulator (all 12 cores; --cores N for fewer)
 ```
 
@@ -26,7 +26,8 @@ Other tools:
 ```bash
 uv run python -m scripts.validate         # report figures -> outs/validation/, in parallel (~1.5 min)
 uv run python -m scripts.snapshot --all   # render each 3D view off-screen to outs/snapshots/
-uv run python -m scripts.fetch_data --only ephem|sbdb|assets
+uv run python -m scripts.fetch_data --only ephem|sbdb|assets|sky
+uv run python -m app.impact_show          # Bennu hits Earth in 2182 (no deflection), on its own
 ```
 
 ## Using the app
@@ -39,6 +40,12 @@ DART / Tractor pin one; ⟲ resets the chase camera), and the info tabs (Mission
 Bottom tabs: Earth–Bennu distance with the DART opportunities, the 2135 B-plane, the Earth–Moon view of the
 keyhole flyby, the DART porkchop, live plots, near-Bennu plots, tractor arrival vs thrust, the Sun.
 Mouse in any 3D view: left-drag rotate, right-drag/scroll zoom, middle-drag pan.
+
+**The sky behind every view is the real one** (core/sky.py, app/scenes/sky.py): the 41,000 stars down to
+magnitude 8 at their J2000 positions, sized by magnitude and coloured by their B−V index. The Milky Way shows as
+the crowding of the faint stars along the Galactic plane. **Constellations** (Display) draws the 88 IAU figures and
+names in every view; the 🏠 side view of the Solar System always shows them. The stars are infinitely far: turning
+a camera turns the sky, panning or zooming does not move it.
 
 **Session log.** Every session writes `outs/logs/session_YYYYmmdd_HHMMSS.jsonl` (the "log" label in the status
 bar shows the path), one JSON object per line:
@@ -61,12 +68,21 @@ interactive run.
   use the combo box). Each marker shows what **the DART as set** (mass, max speed, β, β uncertainty, sizing) does
   in that window; see [DART window markers](#dart-window-markers-the-distance-plot). **Show DART window markers**
   (next to the plot's tab) hides them for a clean plot.
+- **Launch no earlier than** (DART section): the plan uses only launches from this date on (plus 40 days of
+  orbit raising): the best arc of the selected window after it, or the recommended window still open. Dragging the
+  time slider by hand sets it to the slider's date ("follow the time slider"; Play and Jump to… do not), and a
+  date typed or picked moves the clock there. A date before a window's best arc leaves the plan unchanged.
 - **DART**: recommended or manual mass; **orbit-raising cut-off speed (max velocity)**: the DART raises its
   orbit with burns at perigee and leaves Earth when its perigee speed reaches the planned departure speed, at
   most this value; β and its uncertainty.
 - **Mission plan** tab: verdict and probability over β, the shift needed / targeted / delivered, the DART
   plan (dates, impact speed, mass, point of contact, every orbit-raising burn with its fuel), the tractor that
   would follow, the opportunity table and the checks. The Bennu view marks the DART aim point.
+- **The gravity tractor's launch window** (blue, on the distance plot): a translucent band over the launch dates
+  that still reach Bennu in time for a tow that closes the remaining gap (from the planned DART's verdict on;
+  its dates are in the legend), and the planned tractor's Earth distance rising from Earth to meet Bennu's
+  orange curve at the intercept. In a live run it is recomputed for the 2135 point measured after the verdict.
+  The Solar System view draws the tractor's planned path in the same blue.
 - **Recommended mass, two stages.** The mass is first sized with the linear estimate (instant). About 90 s
   later it is re-sized with the full force model, run in a background process, and the plan says "sized with
   the full force model". Large deflections through the 2060 flyby grow faster than linear, so the
@@ -78,9 +94,10 @@ on screen is computed by the physics in the simulation process, nothing is repla
 
 **Live run.** Pick a launch window (the DART combo box, or click its marker on the distance plot) and press
 **🚀 Launch DART**. If that window is not planned yet, the launch waits for its plan. The run starts in that
-window, 10 days before the DART's orbit raising, with both spacecraft in the parking orbit. If the time slider is
-already past the window's orbit raising, the DART is re-planned for a launch from the slider time in the same
-window; if the window is over, a dialog lists the windows still ahead and offers the next one.
+window, 10 days before the DART's orbit raising, with both spacecraft in the parking orbit. The DART flies the
+plan for the **Launch no earlier than** date (a slider dragged a moment before the press is taken first). If the
+clock has run past the window's orbit raising (Play), the DART is re-planned for a launch from the clock's time in
+the same window; if the window is over, a dialog lists the windows still ahead and offers the next one.
 - **Time runs at the speed you choose.** If the physics cannot keep up (long proximity phases at a high
   speed), the clock shows only what has been computed and the Live flight tab says so. If it must wait for a
   computation (Bennu's orbit, an orbit determination, a re-simulation), the 3-D views make way for a
@@ -92,13 +109,17 @@ window; if the window is over, a dialog lists the windows still ahead and offers
 
   | Close-up | Display speed | Real time |
   |---|---|---|
-  | DART, last 5 minutes before the impact | 30 s per second | ~10 s |
+  | DART, last 5 minutes before the impact (until 1,000 km) | 30 s per second | ~7 s |
+  | DART, last 1,000 km to Bennu (~80 s at 12 km/s) | 5 s per second | ~15 s |
   | DART, last 10 seconds (it enters the Bennu view 150 km out) | real time | ~10 s |
   | Impact: flash and ejecta curtain (first 40 s) | 2 s per second | ~20 s |
   | Impact: ejecta cone spreading (to 20 min) | 1 min per second | ~20 s |
   | Tractor descent above / below 150 m | 5 min / 1.5 min per second | ~20 s / ~40 s |
   | Boulder capture (deploy, reach, grip, lift, stow) | 15 s per second | ~45 s |
   | Lift-off with the boulder (first 15 min) | 1 min per second | ~15 s |
+  | Tractor, last 1,000 km to Bennu (until the proximity operations) | 10 min per second | depends on the closing speed |
+  | Bennu, last 1,000 km to Earth (2182, when it still hits) | 5 s per second | ~16 s |
+  | After an Earth impact: the plume (20 min) | 1 min per second | ~20 s |
 - **Bennu is integrated, not looked up.** From the first push on, Bennu's orbit is integrated with the full
   force model (core/truth.py), with every impulse it actually received and the tractor's actual pull. Before
   any push it is on the scenario orbit, itself a full-force-model integration. The 2135 flyby and the 2182
@@ -120,16 +141,36 @@ window; if the window is over, a dialog lists the windows still ahead and offers
 - Ground tracking after the impact gives β, and the full-model prediction of the 2135 flyby re-anchors the
   linear one; the verdict comes 30 days after the impact, and the clock pauses for your decision (press Play
   to go on without launching):
-  - **success** (≥ 90 % of the target): **🚀 Launch gravity tractor** becomes available. The line under that
-    button always says why it can or cannot launch now: waiting for the verdict (and whether the clock is
-    paused), the DART fell short, planning the tractor, the tractor cannot reach Bennu with these settings, or
-    ready with the arrival date;
+  - **success** (≥ 90 % of the target): **🚀 Launch gravity tractor** is available at once. The tractor is
+    planned ahead, at the impact, for the verdict's date and the shift the team expects, so the button is ready
+    the instant the verdict comes; the verdict then refreshes the launch window for the measured shift. While the
+    button is available the plan is re-made for "launch now" every 30 mission days, so a later press flies a
+    plan for that date (and the arrival it shows). A coloured **status strip** above the button says why it can or
+    cannot launch: red (not available, and why: launch a DART first, the DART fell short, the tractor cannot reach
+    Bennu with these settings), amber (waiting for the verdict, with its date and whether the clock is paused),
+    green (**READY**: launch now → arrival date; launch window open until date), grey (launched: phase and
+    arrival). A change to a tractor setting before its launch re-plans the tractor only; nothing that has flown
+    depends on it, so the mission is not flown again;
   - **short / missed**: the recommendation for the **next DART** (velocity, mass, point of contact at the
     next opportunities, with the measured β) appears in the Live flight tab. The distance plot's markers then
     show what that next DART does in each remaining window, from the deflection reached so far. Click a marker to
     pick another window; **🚀 Launch the next DART**.
 - The tractor flies as in Steps 4–7: escape spiral, low-thrust cruise, proximity operations, boulder
-  capture, tow with the trim law to the DART aim point. ☀ Solar storm; MPC/LQR.
+  capture, tow with the trim law to the DART aim point. ☀ Solar storm; MPC/LQR. At the hand-over from the
+  escape spiral its guidance starts from the ground's optimized flight plan, the one the status strip quoted
+  ("Flight plan: the ground profile"), and refines it from the actual state.
+- **End of the tow**: **⤒ Release the boulder and end the tow** (enabled while the tractor holds its station,
+  towing or parked) lets the boulder go where the craft is. The boulder stays there as a marker and the
+  spacecraft is 10 t again. The craft holds 30 minutes, climbs radially to 50 km (`depart`), burns 0.5 m/s and
+  leaves (`departed`); Bennu is then flown on with the full force model and its prediction is requested. The tow
+  also ends by itself when `tow_years` is up, or once the trim has held (parked, tow off) for 60 days.
+- **Bennu hits Earth** (centre page): when the clock is in the last two days before an Earth impact, or the 20
+  minutes after it, the centre shows it (app/scenes/earth_impact.py). In planning mode that is the scenario
+  without a deflection (Jump to… "Earth impact 2182"); in a live run, the run's verified orbit if it still hits.
+  It shows Bennu's track, the last 1,000 km in slow motion, a flash and a ballistic plume (display model), and a
+  caption with the site and the entry numbers. A live run stops at the impact (the physics ends there); the page
+  then plays the 20 minutes after it and returns to the Solar System. `uv run python -m app.impact_show` plays it
+  on its own; see [Bennu hits Earth](#bennu-hits-earth-in-2182-coreearth_impactpy).
 - ⏩ **Run to the end**: the clock runs as fast as the physics allows through the 2135 flyby to 2185; the
   distance plot shows the full-model orbit in green and the clock runs on to "Earth is safe" or the impact.
 
@@ -141,7 +182,8 @@ window; if the window is over, a dialog lists the windows still ahead and offers
 | Bennu GM, density, size, spin, Earth approaches | JPL Small-Body Database API |
 | Bennu shape (3.37 M faces, 88 cm) and Nightingale TAG-site patch (5 cm) | NASA SVS #5069, OSIRIS-REx OLA v20 |
 | OSIRIS-REx spacecraft model | NASA Science 3D Resources (glTF) |
-| Earth, Moon, Sun textures; space skybox | PyVista example datasets |
+| Earth, Moon, Sun textures | PyVista example datasets |
+| Star sky: 41,411 stars to magnitude 8 (J2000, V, B−V) and the 88 constellation figures | d3-celestial (Olaf Frohn, BSD-3): stars from XHIP, Anderson & Francis 2012 (VizieR V/137D); figures from the IAU constellation pages |
 
 ## Step 1 validation (tests/test_step1_data.py)
 
@@ -581,8 +623,9 @@ The planets pull on the Sun as it pulls on them, so the Sun orbits the common ce
   - At the true speed the paths are long, stretched helices: in one year Earth circles at 1 AU while the Sun moves
     52 AU, so on screen they look almost straight. **"🏠 side view: slow the Galactic motion ×1/50"** (Display,
     display only, stated in the caption) makes the turns visible, as in the popular "helix" pictures.
-  - The background is a decorative space image, not the real sky: its Milky Way band does not lie along the
-    Galactic plane.
+  - The background is the real sky (core/sky.py), rotated into the view's ecliptic axes, so the Milky Way (the
+    crowding of the faint stars) lies along the Galactic plane, and the side view looks toward Sagittarius with
+    Cygnus to the left. The constellations are drawn in this view.
 
 Step 7 validation (tests/test_step7_tow.py, figures `tow`, `sun_barycenter`):
 
@@ -647,8 +690,10 @@ the *difference* to the stored scenario state.
   needed shift λ solves |b + λd| = R_goal along the line of variations d.
 - **DART opportunities.** One per close pass inside 0.3 au, passes closer than 300 days merged: 15 passes
   2030–2128.
-  - Each has a porkchop: launches from 1.5 yr before to 0.3 yr after the pass, flights of 30–700 days,
-    departure speed √(v∞² + 2μ/r_p) at most the cut-off, impact at least 2 yr before the flyby.
+  - Each has a porkchop: launches from 1.5 yr before to 0.3 yr after the pass (on a 4-day grid anchored at the
+    window's start, and not before the earliest launch + 40 days), flights of 30–700 days, departure speed
+    √(v∞² + 2μ/r_p) at most the cut-off, impact at least 2 yr before the flyby, and an **impact speed of at least
+    3 km/s** (`MIN_IMPACT_SPEED`).
   - The gain per kg (head-on) is d·B(t)βU/M. The arc needing the least mass is recommended, with masses for
     the planned β and for 90 % confidence.
 - **Recommended masses** (linear, head-on) for the 318,500 km target at 12.5 km/s cut-off, β = 3.6:
@@ -704,6 +749,28 @@ the *difference* to the stored scenario state.
   - An **overshoot is held, not pulled back.** The tow's sensitivity is linearized about the scenario orbit,
     and pulling a large overshoot back through the 2060 flyby is too nonlinear to steer safely: a test run
     that tried it ended at 0.40 LD in the full model.
+
+### Bennu hits Earth in 2182 (core/earth_impact.py)
+
+The impact page (and `app/impact_show.py`) follows Bennu's last two days on the scenario orbit, which ends 60 s
+above the surface (minute nodes in the last hour), flown on to the surface under Earth's gravity. A live run whose
+orbit still hits uses its own full-model track instead. The numbers in the caption follow the Earth Impact Effects
+Program (Collins, Melosh & Marcus 2005, *Meteoritics & Planetary Science* 40, 817–840), checked against the paper:
+
+| Quantity | Value (scenario, no deflection) | From |
+|---|---|---|
+| Impact | 2182-09-24 20:29 UTC, 57.8° S 61.8° E, open ocean (read from the Earth texture), local solar time 00:56 | the track |
+| Entry (100 km) | 12.68 km/s, 76° to the horizon | the track |
+| Kinetic energy | 5.9·10¹⁸ J = 1,408 Mt TNT (Bennu 7.33·10¹⁰ kg, 484 m) | ½mv² |
+| Breakup | at 72 km (strength 2·10⁴ Pa from Bennu's 1,230 kg/m³) | Eqs. 9–12 |
+| Airburst | none: the pancake reaches the surface before it spreads 7×; 12.19 km/s at the surface | Eqs. 15–18, Eq. 17 integrated numerically |
+| Transient cavity in the water | ~6.8 km | Eq. 21 with the water constant 1.365 |
+
+- Collins et al. give a fireball radius (Eq. 32) only above ~15 km/s, where the impactor vaporizes; Bennu arrives
+  at 12.7 km/s, so none is quoted. The flash on screen is a display effect.
+- The plume is a display model: 1,500 particles thrown from the site in a 40° cone around the vertical at
+  0.3–5 km/s, flown ballistically in Earth's gravity (no air) and left on the turning Earth where they land.
+- The tsunami is not modelled.
 
 ### DART window markers (the distance plot)
 
@@ -800,6 +867,41 @@ order, and the Step 6 test uses that to launch the tractor first.
 | Undersized DART (30 % of the recommendation) | short (34 %); DART #2 (758 kg, 2031 pass) brings the flyby to 1.21 LD |
 | Full-model sizing of the 2030 DART | 142 kg instead of 191 kg linear; delivers 100.3 % of the target (4 propagations, 93 s) |
 
+## Findings and fixes (2026-10-17)
+
+- **"The spacecraft moves back and forth" at slow speeds** was a display sawtooth, not the guidance. The DART's
+  cruise steps on its own 12-hour grid that ends past the mission clock, and so do the tractor's escape and
+  cruise. The views drew the craft at the end of its step while Earth and Bennu were at the clock's time. At 10
+  min/s the craft froze for about 70 s and then jumped half a day ahead. The craft are now drawn at the clock,
+  interpolated (cubic Hermite) between their last two states; the physics grid is unchanged, so runs stay bit
+  identical (tests/test_display_interp.py).
+- **The tractor re-parked every week after the trim** (a 175° transfer around Bennu, then 5°, …). Two causes:
+  1. with the aim reached the error was ~0, so its direction g/|g| was numerical noise that flipped from one
+     update to the next, and each flip moved the parking point to the other side. The direction now changes
+     only while towing and with an error above 100 m;
+  2. parked 5 km out, the tractor still pulls about 1 %, enough to re-arm the tow every ~50 days. It now
+     resumes only when the error is worth 3 days of towing.
+
+  The tow also ends now: the boulder is released after 60 days of holding the trim, when `tow_years` is up,
+  or on command (tests/test_trim_hold.py, tests/test_release.py).
+- **A different launch date gave the same run.** "Launch DART" flew the window's best arc planned from today
+  whatever the time slider said. The new "Launch no earlier than" date (bound to the slider) restricts the
+  porkchop to later launches. The porkchop's launch grid is now anchored at the window's start, so a date that
+  does not constrain the arc leaves the plan as it was (tests/test_earliest_launch.py).
+- **Slow DART arcs.** Late in a window the best remaining arc could hit at 0.65–1.1 km/s: a 1.3 t DART for
+  the 2030 window from April 2030, and a 0.8 km/s next-DART recommendation in a live run. β is measured (DART,
+  6.1 km/s) and modelled for impacts of several km/s; below that it would be an extrapolation. The planner now
+  requires 3 km/s at impact.
+- **Review of the post-impact physics** (`apply_impact` → `Deflection.impulse` → outlook and verdict): Bennu's
+  velocity change is M·Δv = m·U + m(β−1)(n̂·U)n̂, with n̂ the outward surface normal; head-on it reduces to βmU/M.
+  The same impulse goes to the linear deflection state (exact through the STM) and to the full-model truth. The
+  verdict uses the 2135 point re-anchored on the full-model prediction. No other defect found.
+- **The tractor launch** looked unavailable while waiting for the verdict (a grey line under a disabled
+  button, clicked twice in a session log). It now has the coloured status strip, is planned ahead of the
+  verdict, and a late next-DART recommendation can no longer disable it (a race in `_on_recommendation`).
+- **Colours**: Bennu's curve on the distance plot is now orange (as in the Solar System view); the gravity
+  tractor is blue everywhere.
+
 ## Layout
 
 ```
@@ -818,9 +920,13 @@ core/planner.py, core/deflection.py   mission planner (DART opportunities, tract
 core/scenario.py, core/dart.py   keyhole scenario (virtual impactor, close approaches); DART orbit raising, point of contact
 core/refine.py  full-model (nonlinear) sizing of a DART's mass, run in a background process
 core/mission.py live N-body mission: spacecraft state machines, events, snapshots for the UI
+core/sky.py     star catalogue and constellations (d3-celestial), B−V star colours
+core/earth_impact.py  Bennu hits Earth: approach track, site, Collins et al. entry and crater numbers, plume
 app/            main window (main.py), panels, plots, widgets, background workers, live-run thread
                 (livesim.py), planner worker processes (compute.py), procedural DART model (models.py)
-app/scenes/     the 3D views: solar (center), bennu, craft (chase camera), earth_moon (bottom tab)
+app/scenes/     the 3D views: solar (center), bennu, craft (chase camera), earth_moon (bottom tab),
+                earth_impact (center, around an Earth impact); sky (the star layer behind every view)
+app/impact_show.py  the 2182 impact as a stand-alone program
 scripts/        fetch_data, fit_bennu, precompute, make_scenario, validate, snapshot
 tests/     validation suite
 data/      cached ephemerides + SBDB record (generated)
@@ -838,4 +944,7 @@ assets/    processed models (raw downloads in assets/raw/)
 - [x] Step 7 — gravity-tractor tow, B-plane trim guidance, nonlinear verification; the Sun around the barycenter
 - [x] Mission goal change — 2135 keyhole → 2182 impact scenario, DART opportunities and recommendations,
       DART orbit raising and point of contact, sequential DART → gravity tractor, multi-view UI
+- [x] Fixes and features (2026-10-17) — display interpolation, slow motion from 1,000 km, end of the tow with
+      boulder release, tractor status strip / launch window / warm start, earliest launch date, minimum impact
+      speed, the real star sky with constellations, the 2182 Earth impact page and program
 - [ ] Step 8 — visual polish, record/replay movie, report figures

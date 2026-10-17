@@ -50,6 +50,11 @@ TODAY = "2026-10-15"
 PASS_MAX_AU = 0.3
 PASS_MERGE = 300 * DAY
 GROUND_OD_DAYS = 30.0  # orbit determination after an impact before its result is known
+PORKCHOP_STEP = 4 * DAY  # launch-date grid of the DART porkchops
+# slowest impact the DART planner accepts: the momentum enhancement beta is measured (DART, ~6.1 km/s) and modelled
+# (impact simulations and the ejecta scaling laws behind them) for impacts of several km/s; a sub-km/s arc's beta
+# would be an extrapolation (and it needs several times the mass)
+MIN_IMPACT_SPEED = 3e3
 Z90 = 1.2816
 
 
@@ -156,6 +161,7 @@ class TractorPlan:
     tow_direction: np.ndarray = field(default=None, repr=False)
     path: np.ndarray = field(default=None, repr=False)  # barycentric display path (N, 3)
     path_t: np.ndarray = field(default=None, repr=False)
+    flight_plan: dict = field(default=None, repr=False)  # optimized low-thrust profile (tractor_flight_plan), if any
     note: str = ""
 
 
@@ -379,9 +385,12 @@ class Planner:
 
     # ------------------------------------------------------------------ DART opportunities
     def _porkchop(self, p, t_lo, t_hi, t_after):
-        """Lambert arcs launched in [t_lo, t_hi]: departure speed, impact velocity, B-plane shift per kg (beta = 1)."""
+        """Lambert arcs launched in [t_lo, t_hi], not before t_after: departure speed, impact velocity, B-plane shift
+        per kg (beta = 1). The launch grid is anchored at t_lo (a later t_after only drops its first dates: an
+        earliest launch that does not bind leaves the plan as it was)."""
         r_park = RADIUS["earth"] + p.parking_alt_km * 1e3
-        launch = np.arange(max(t_lo, t_after), t_hi, 4 * DAY)
+        launch = np.arange(t_lo, t_hi, PORKCHOP_STEP)
+        launch = launch[launch >= t_after - 1.0]
         tofs = np.arange(30.0, 701.0, 5.0) * DAY
         if len(launch) == 0:
             return None
@@ -424,24 +433,28 @@ class Planner:
             if t_hi < t_after + 40 * DAY:
                 continue
             opp = Opportunity(index=k, t_pass=a["t"], pass_dist=a["dist"], remaining=remaining)
-            key = (k, p.parking_alt_km, round(t_after / DAY))
+            t_first = max(t_lo, t_after + 40 * DAY)  # the first launch: leave time for the orbit raising
+            key = (k, p.parking_alt_km, int(np.ceil((t_first - t_lo) / PORKCHOP_STEP - 1e-9)))  # (grid dates dropped)
             pc = self._opp_cache.get(key)
             if pc is None:
-                pc = self._porkchop(p, t_lo, t_hi, t_after + 40 * DAY)  # leave time for the orbit raising
+                pc = self._porkchop(p, t_lo, t_hi, t_first)
                 if len(self._opp_cache) > 400:
                     self._opp_cache.clear()
                 self._opp_cache[key] = pc
             if pc is None:
                 continue
             s = np.where(pc["valid"], p.beta * (pc["s_vec"] @ d), np.nan)
-            ok = np.isfinite(s) & (s > 0) & (pc["v_dep"] <= v_max)
+            fast = pc["speed"] >= MIN_IMPACT_SPEED  # (slower impacts: outside the regime where beta is measured)
+            ok = np.isfinite(s) & (s > 0) & (pc["v_dep"] <= v_max) & fast
             for vm in (11.5, 12.5, 14.0, 16.0):
-                okv = np.isfinite(s) & (s > 0) & (pc["v_dep"] <= vm * 1e3)
+                okv = np.isfinite(s) & (s > 0) & (pc["v_dep"] <= vm * 1e3) & fast
                 if okv.any():
                     j = int(np.nanargmax(np.where(okv, s, -np.inf)))
                     opp.trade.append((vm, float(pc["speed"][j]), remaining / s[j] if remaining > 0 else 0.0))
             if not ok.any():
-                opp.note = "no arc within the departure-speed limit"
+                slow = np.isfinite(s) & (s > 0) & (pc["v_dep"] <= v_max)
+                opp.note = (f"only slow arcs (impact below {MIN_IMPACT_SPEED / 1e3:g} km/s) within the departure-speed limit"
+                            if slow.any() else "no arc within the departure-speed limit")
                 out.append(opp)
                 continue
             j = int(np.nanargmax(np.where(ok, s, -np.inf)))
@@ -526,6 +539,8 @@ class Planner:
         ip = ImpactorPlan(number=number, opportunity=opp.index)
         ip.mass_nominal, ip.mass_p90 = opp.mass_nominal, opp.mass_p90
         if not opp.feasible:
+            if opp.note and opp.note.startswith("only slow arcs"):
+                return ip, Check("fail", f"DART: near the {self._year(opp.t_pass)} pass {opp.note}")
             return ip, Check("fail", f"DART: no arc near the {self._year(opp.t_pass)} pass within "
                                      f"{p.dart_max_speed_kms:g} km/s departure speed")
         t_after = iso_to_t(p.earliest_launch)
@@ -566,7 +581,8 @@ class Planner:
         n_l, n_t = pc["shape"]
         ip.porkchop = {"launch": pc["launch"], "tof": pc["tof"], "v_dep": pc["v_dep"].reshape(n_l, n_t),
                        "speed": pc["speed"].reshape(n_l, n_t),
-                       "shift": np.where(pc["valid"] & (pc["v_dep"] <= p.dart_max_speed_kms * 1e3),
+                       "shift": np.where(pc["valid"] & (pc["v_dep"] <= p.dart_max_speed_kms * 1e3)
+                                         & (pc["speed"] >= MIN_IMPACT_SPEED),
                                          np.nan_to_num(pc["s_vec"] @ d) * p.beta * ip.mass, 0.0).clip(0).reshape(n_l, n_t)}
         if ip.raising.t_start < t_after:
             return ip, Check("warn", "DART: the orbit raising would have to start before today")
@@ -632,15 +648,56 @@ class Planner:
         self._gravity_tractor(p, tp, b_now)
         return tp, None
 
-    def plan_tractor_launch(self, p, t, b_now):
+    def plan_tractor_launch(self, p, t, b_now, flight_plan=None):
         """The tractor launched at t: quick plan, optimized flight plan, tow window and reach (what the live run
-        flies after a successful DART)."""
+        flies after a successful DART). The optimized profile travels in tp.flight_plan: the live run flies it from
+        the hand-over (TractorFlight warm start), so the launch flies the plan the user saw."""
         tp, msg = self.plan_tractor(p, t, b_now)
-        fp = self.tractor_flight_plan(p, t) if tp.feasible else None
+        fp = flight_plan if flight_plan is not None else (self.tractor_flight_plan(p, t) if tp.feasible else None)
         if fp is not None and fp.get("feasible"):
             tp.t_arrive_flight = fp["t_arrive"]
+            tp.flight_plan = fp
             self._gravity_tractor(p, tp, b_now, t_arrive=fp["t_arrive"])
         return tp, msg
+
+    def tractor_launch_window(self, p, t_from, b_now=None, step=30 * DAY):
+        """Launch dates for the tractor from t_from: which still reach Bennu in time for a tow that closes the gap
+        to the aim point (the blue launch-window band of the distance plot, and "launch window open until").
+
+        Each launch date goes through plan_tractor (escape + Lambert estimate, hover sizing, steered tow until
+        t_ca - 0.5 yr): a date is in the window when the plan is feasible and the tow's reach along the aim
+        direction covers the shift still needed from b_now (any reach, when the aim is already met). The sweep is
+        yearly, then monthly (`step`) across the year in which the window closes (the reach collapses after the
+        2060 flyby: a tow that starts later moves the 2135 flyby thousands of km instead of millions).
+        Returns {"t": launch dates, "t_arrive", "reach", "ok", "t_last": last launch in the window (nan if none),
+                 "gap": the shift still needed [m]}."""
+        b_now = self.b0 if b_now is None else np.asarray(b_now, float)
+        w = self.aim_dir(p, b_now)
+        aim = self.aim_on_line(p, b_now)
+        gap = float((aim - b_now) @ w) if np.linalg.norm(aim) >= np.linalg.norm(b_now) else 0.0  # overshoot: held
+        gap = max(0.0, gap)
+        t_end = self.t_ca - YEAR
+
+        def point(t):
+            tp, _ = self.plan_tractor(p, t, b_now)
+            ok = bool(tp.feasible and (tp.reach >= gap if gap > 0 else True))
+            return (float(t), tp.t_arrive if tp.feasible else np.nan, tp.reach if tp.feasible else 0.0, ok)
+
+        rows = [point(t) for t in np.arange(t_from, t_end, YEAR)]
+        if rows and rows[-1][0] < t_end - step:
+            rows.append(point(t_end - 1.0))
+        ok_idx = [i for i, r in enumerate(rows) if r[3]]
+        if ok_idx:  # refine the year after the last launch in the window (where it closes)
+            i = ok_idx[-1]
+            t_a = rows[i][0]
+            t_b = rows[i + 1][0] if i + 1 < len(rows) else t_end
+            rows += [point(t) for t in np.arange(t_a + step, t_b, step)]
+        rows.sort(key=lambda r: r[0])
+        out = {k: np.array([r[j] for r in rows]) for j, k in enumerate(("t", "t_arrive", "reach", "ok"))}
+        out["ok"] = out["ok"].astype(bool)
+        out["t_last"] = float(out["t"][out["ok"]].max()) if out["ok"].any() else np.nan
+        out["gap"] = gap
+        return out
 
     def _gravity_tractor(self, p, tp, b_now, t_arrive=None):
         m_T = p.tractor_mass_kg + p.boulder_mass_kg
@@ -693,7 +750,8 @@ class Planner:
         if not np.isfinite(tf):
             return {"feasible": False}
         dv = esc["dv"] + float(np.linalg.norm(g.dv, axis=1).sum())
-        return {"feasible": True, "t_launch": t_launch, "t_arrive": tf, "dv": dv, "params": p}
+        return {"feasible": True, "t_launch": t_launch, "t_arrive": tf, "dv": dv, "params": p, "t_handover": th,
+                "profile": g.profile()}  # the profile: the live run's warm start (TractorFlight._handover)
 
     def tractor_eta_curve(self, p, t_launch, thrusts):
         """Arrival time vs thrust for a launch at t_launch."""

@@ -6,6 +6,7 @@
     uv run python -m app.main --smoke-prox   # ... through the tractor's proximity operations and the tow
     uv run python -m app.main --smoke-fail   # an undersized DART falls short -> recommendation -> DART #2
     uv run python -m app.main --smoke-windows  # DART window markers: shown / hidden, before / after a heavier DART
+    uv run python -m app.main --smoke-impact   # planning: jump to the 2182 impact, play through it (impact page)
     uv run python -m app.main --cores 8      # core budget (default: all of them, 12 on an M3 Pro)
 
 Layout: controls on the left; the Solar System in the center (always); on the right Bennu (always), the craft
@@ -35,11 +36,12 @@ from pyvistaqt import QtInteractor
 from app.livesim import make_sim
 from app.panels import SPEEDS, START_DATE, ControlsPanel, LivePanel, MissionPanel, TelemetryPanel
 from app.plots import BPlanePlot, DistancePlot, EtaPlot, LivePlots, PorkchopPlot, ProxPlots, SunPlot
-from app.scenes import BennuScene, CraftScene, EarthMoonScene, SolarScene
+from app.scenes import BennuScene, CraftScene, EarthImpactScene, EarthMoonScene, SolarScene
 from app.scenes.solar import GALACTIC_SLOW
 from app.session_log import SessionLog
 from app.workers import Debounced
 from core.constants import AU, DAY
+from core.earth_impact import SHOW_AFTER, SHOW_BEFORE, EarthImpact
 from core.ephemeris import Ephemeris
 from core.planner import GROUND_OD_DAYS, Planner, dart_params, physical_params
 from core.scenario import KeyholeScenario
@@ -181,6 +183,13 @@ class MainWindow(QtWidgets.QMainWindow):
         home.toggled.connect(self._solar_home)
         self.center.addWidget(_titled(self.p_solar.interactor, "Solar System", [home]))
         self.center.addWidget(self.recalc)
+        # page 2: Bennu hits Earth (the last two days and 20 minutes after; app/scenes/earth_impact.py)
+        self.p_impact = _interactor(self)
+        self.earth_impact = EarthImpactScene(self.p_impact, self.eph, self.sc)
+        self.center.addWidget(_titled(self.p_impact.interactor, "Bennu hits Earth"))
+        self._impact_on = False
+        self._impacts = {}  # cached EarthImpact per track: "scenario" or ("live", t_hit)
+        self._aftermath = None  # a live run that ended with the impact: the display plays the 20 minutes after it
         self._side_views = [right.widget(0), right.widget(1)]
         self._busy_since = None
         top = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -214,6 +223,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                          self.compute.run("tractor", compute.job_flight_plan, p, tl)), 700, self)
         self.fp_job.result.connect(self._on_flight_plan)
         self._fp_key = None
+        # planning mode: the tractor's launch window (the blue band of the distance plot) for the planned DART
+        self.win_job = Debounced(lambda: (lambda p=self.controls.params(), tl=self._tractor_launch_time(),
+                                          b=self._planned_b_dart():
+                                          self.compute.run("tractor", compute.job_tractor_window, p, tl, b)), 900, self)
+        self.win_job.result.connect(self._on_tractor_window)
         # full-model refinement of the recommended DART mass, in a separate process (core/refine.py)
         self._refiner = None
         self._refined = {}  # key -> refined mass
@@ -227,17 +241,26 @@ class MainWindow(QtWidgets.QMainWindow):
                                           self.compute.run("live", compute.job_recommend, *a, sp)), 200, self)
         self.rec_job.result.connect(self._on_recommendation)
         self.rec_job.error.connect(self.live_panel.show_error)
-        self.tr_job = Debounced(lambda: (lambda a=self._rec_args():
-                                         self.compute.run("live", compute.job_tractor, *a[:3])), 200, self)
+        self.tr_job = Debounced(lambda: (lambda a=self._tr_args():
+                                         self.compute.run("live", compute.job_tractor, *a)), 200, self)
         self.tr_job.result.connect(self._on_tractor_plan)
         self.tr_job.error.connect(self.live_panel.show_error)
+        self.tr_job.error.connect(lambda msg: self.controls.set_tractor_status(
+            "red", "Not available: the tractor plan failed — " + msg.strip().splitlines()[0][:120]))
+        self.tr_job.busy.connect(lambda b: setattr(self, "_tr_busy", b))
+        self._tr_busy = False
+        self._tr_sent = False  # the launch was ordered and the snapshot does not show it yet
+        self._tr_planned_t = -np.inf  # mission time the current tractor plan was made for ("launch now")
+        self._tr_want_window = True  # the next tractor job also sweeps the launch window (b_now changed)
+        self._tr_ahead = None  # the DART impact for which the tractor was planned ahead of the verdict
+        self._tractor_window = None
         # planning mode, the slider past the selected window: plan the DART from the slider time, then launch
         self._launch_from = None
         self.launch_job = Debounced(lambda: (lambda p=self.controls.params(), t=self._launch_from:
                                              self.compute.run("live", compute.job_launch_plan, p, t)), 0, self)
         self.launch_job.result.connect(self._on_launch_plan)
         self.launch_job.error.connect(self.mission.show_error)
-        for name in ("plan_job", "eta_job", "fp_job", "rec_job", "tr_job", "launch_job"):
+        for name in ("plan_job", "eta_job", "fp_job", "win_job", "rec_job", "tr_job", "launch_job"):
             getattr(self, name).error.connect(lambda msg, n=name: self.log.write("job", job=n, error=msg))
         self.next_dart = None
         self.next_tractor = None
@@ -261,11 +284,22 @@ class MainWindow(QtWidgets.QMainWindow):
         c.galactic_slow.toggled.connect(lambda on: (self.solar.set_galactic_slow(GALACTIC_SLOW if on else 1.0),
                                                     _draw(self.p_solar)))
         c.slider.valueChanged.connect(lambda d: self.set_time(lo + d * DAY))
+        c.constellations.toggled.connect(self._apply_constellations)
+        # the earliest DART launch and the time slider, two-way: the slider dragged by hand (actionTriggered: user
+        # actions only, not Play or Jump to…) sets the date 400 ms after the last move; a new date moves the clock
+        self._slider_date = QtCore.QTimer(self)
+        self._slider_date.setSingleShot(True)
+        self._slider_date.setInterval(400)
+        self._slider_date.timeout.connect(self._slider_to_launch_date)
+        c.slider.actionTriggered.connect(lambda _: c.follow_slider.isChecked() and self._slider_date.start())
+        c.launch_after.dateChanged.connect(self._launch_date_to_clock)
+        self._date_from_slider = False
         c.play.toggled.connect(self._on_play)
         c.jump.activated.connect(self._on_jump)
         c.paramsChanged.connect(self._on_params)
         c.launch_dart.clicked.connect(self._on_launch_dart)
         c.launch_tractor.clicked.connect(self._on_launch_tractor)
+        c.release.clicked.connect(self._on_release)
         c.storm.clicked.connect(lambda: self.sim and self.sim.send("storm", c.storm_days.value()))
         c.skip.clicked.connect(lambda: self.sim and self.sim.send("skip"))
         c.finish.clicked.connect(lambda: self.sim and self.sim.send("finish"))
@@ -295,6 +329,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(33)
         self.timer.timeout.connect(self._tick)
         self._last_tick = None
+        self._after_timer = QtCore.QTimer(self)  # the 20 minutes after an Earth impact that ended a live run
+        self._after_timer.setInterval(33)
+        self._after_timer.timeout.connect(self._aftermath_tick)
 
         self._set_jumps()
         self.set_time(self.t)
@@ -323,6 +360,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.sim is not None:  # live run: the physics is flown again with the new parameters
             if _physical(self.controls.params()) == _physical(self._live_params):
                 return  # (a display or storm setting: nothing physical changed)
+            s = self._last_snap or {}
+            if dart_params(p) == dart_params(self._live_params) and not s.get("tractor_launched") and not self._live_dirty:
+                # only the gravity tractor's settings changed and it has not launched: nothing that has flown
+                # depends on them, so the mission is not re-flown; the tractor is re-planned (and the Mission plan
+                # preview updated) for the new settings
+                self.log.write("action", what="tractor settings changed before its launch: re-plan the tractor only")
+                self._live_params = p
+                self._tr_want_window = True
+                ki = s.get("impactor") or {}
+                if s.get("dart_ok") or ki.get("phase") == "impacted":
+                    self.next_tractor = None
+                    self._tr_ahead = None
+                    self.controls.set_stage("live", dart_ready=self.controls.launch_dart.isEnabled(), tractor_ready=False)
+                    self.tr_job.request()
+                    self._update_tractor_status(s)
+                self.plan_job.request()
+                return
             self._live_dirty = True
             self._set_recalc("Recalculating physics", "Planning the DART for the new parameters…", None)
         self.plan_job.request()
@@ -358,6 +412,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._live_params = self.controls.params()
         self._results_seen = 0
         self.next_dart = self.next_tractor = None
+        self._tr_ahead, self._tr_planned_t, self._tractor_window, self._tr_want_window = None, -np.inf, None, True
+        self._tr_sent = False
+        self._aftermath = None
+        self.distance.set_tractor(None)
         self.live_panel.recommendation = None
         self.controls.set_stage("live", dart_ready=False, tractor_ready=False)
         self.live_plots.reset()
@@ -373,7 +431,24 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ full-model mass refinement
     def _refine_key(self, p, live=None):
         base = (p.goal_ld, p.dart_target_km, round(p.beta, 2), p.dart_max_speed_kms, p.opportunity, p.parking_alt_km)
-        return base if live is None else base + live
+        # planning mode: the earliest launch picks the arc (a live run's next DARTs launch from its clock instead)
+        return base + (p.earliest_launch,) if live is None else base + live
+
+    def _slider_to_launch_date(self):
+        """The time slider was dragged by hand: the DART's earliest launch follows it (planning mode)."""
+        if self.sim is not None or not self.controls.follow_slider.isChecked():
+            return
+        self._date_from_slider = True
+        try:
+            self.controls.set_earliest_launch(self.t)
+        finally:
+            self._date_from_slider = False
+
+    def _launch_date_to_clock(self, _date=None):
+        """A new earliest-launch date typed or picked: the clock moves there (unless the slider set it)."""
+        if self.sim is None and not self._date_from_slider:
+            self.log.write("action", what="clock moved to the earliest launch", t=self.controls.params().earliest_launch)
+            self.set_time(self.controls.earliest_launch_t())
 
     def _with_refined(self, p, live=None):
         m = self._refined.get(self._refine_key(p, live))
@@ -460,7 +535,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mission.set_flight_plan(None)
             self.fp_job.request()
             self.eta_job.request()
+        if self.sim is None:  # planning preview: the tractor's launch window for this plan (the blue band)
+            wkey = key + (tuple(np.round(self._planned_b_dart() / 1e3)), res.params.boulder_mass_kg,
+                          res.params.tow_years, res.params.hover_factor, res.params.goal_ld, res.params.dart_target_km)
+            if wkey != getattr(self, "_win_key", None):
+                self._win_key = wkey
+                self.win_job.request()
+            w = self._tractor_window
+            self.distance.set_tractor(w, res.tractor.path_t if res.tractor.feasible else None,
+                                      res.tractor.path if res.tractor.feasible else None, self.eph)
         self._render_all()
+
+    def _planned_b_dart(self):
+        """The 2135 point after the planned DART (the tractor window in planning mode is drawn for it)."""
+        r = self.result
+        return self.planner.b0 + (r.impactor.db if r is not None and r.impactor.feasible else np.zeros(2))
+
+    def _on_tractor_window(self, window):
+        self.log.write("result", what="tractor launch window", t_last=window.get("t_last"), gap_km=window.get("gap", 0) / 1e3,
+                       n_ok=int(np.sum(window["ok"])))
+        self._tractor_window = window
+        r = self.result
+        if self.sim is None and r is not None:
+            self.distance.set_tractor(window, r.tractor.path_t if r.tractor.feasible else None,
+                                      r.tractor.path if r.tractor.feasible else None, self.eph)
 
     def _on_flight_plan(self, fp):
         self.mission.set_flight_plan(fp)
@@ -496,7 +594,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if a["dist"] < 0.1 * AU:
                 items.append((f"Earth approach {t_to_utc_str(a['t'])[:10]} ({a['dist'] / AU:.4f} au)", a["t"]))
         items += [("2135 keyhole flyby", self.sc.t_ca), (f"Earth impact {t_to_utc_str(self.sc.t_impact)[:10]}",
-                                                         self.sc.t_impact - 3 * DAY)]
+                                                         self.sc.t_impact - SHOW_BEFORE)]
         self.controls.set_jumps(items)
 
     def _on_jump(self, idx):
@@ -525,8 +623,78 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.distance.set_time(self.t)
             elif bottom is self.sun_plot:
                 self.sun_plot.set_time(self.t)
+        self._impact_page(self.t)
         if render:
             self._render_all(side=side)
+
+    # ------------------------------------------------------------------ Bennu hits Earth (centre page 2)
+    def _impact_track(self):
+        """(EarthImpact, label) of the impact the views show, or None: in planning mode the scenario without a
+        deflection; in a live run its verified orbit, when that still hits Earth (core/earth_impact.py)."""
+        if self.sim is None:
+            key, label, fc = "scenario", "the scenario without a deflection", None
+        else:
+            out = (self._last_snap or {}).get("outlook") or {}
+            t_hit = out.get("t_earth_impact", np.nan)
+            if t_hit is None or not np.isfinite(t_hit):
+                return None
+            fc = out.get("final_check") or {}
+            key = "scenario" if abs(t_hit - self.sc.t_impact) < 600.0 or "fine_t" not in fc else ("live", round(t_hit))
+            label = "this run: its orbit still hits Earth"
+        imp = self._impacts.get(key)
+        if imp is None:
+            imp = self._impacts[key] = (EarthImpact.from_scenario(self.eph, self.sc) if key == "scenario" else
+                                        EarthImpact.from_track(self.eph, fc["fine_t"], fc["fine_x"]))
+        return imp, label
+
+    def _impact_slowmo(self, imp, t):
+        """(warp, what) of the slow motion shown on the impact page, or None."""
+        if not self.controls.slowmo.isChecked():
+            return None
+        if self.sim is not None and self._aftermath is None:
+            sm = (self._last_snap or {}).get("slowmo")
+            return (sm["warp"], sm["what"]) if sm else None
+        return imp.slow_motion(t)
+
+    def _impact_page(self, t):
+        """The centre shows Bennu hitting Earth while the clock is in the last two days before the impact or the
+        20 minutes after it (a live run that ended with the impact: the aftermath timer's display time)."""
+        got = self._impact_track()
+        am = self._aftermath if self.sim is not None else None
+        t_show = am["t"] if am is not None else t
+        on = (got is not None and got[0].t_hit - SHOW_BEFORE <= t_show <= got[0].t_hit + SHOW_AFTER
+              and not (am is not None and am["done"]))
+        if on:
+            imp, label = got
+            self.earth_impact.set_impact(imp, label)
+            self.earth_impact.update(t_show, self._impact_slowmo(imp, t_show))
+            _draw(self.p_impact)
+        if on != self._impact_on:
+            self._impact_on = on
+            self.log.write("action", what=f"Earth impact page {'on' if on else 'off'}", t=t_to_utc_str(t_show)[:19])
+            if self.center.currentIndex() != 1:  # (the recalculation page keeps priority)
+                self.center.setCurrentIndex(2 if on else 0)
+
+    def _start_aftermath(self, t_hit):
+        """A live run ended with the impact (the physics stops there): the impact page plays the 20 minutes after it
+        (the plume is a display model), at 1 min/s with slow motion on, else at the chosen speed."""
+        self._aftermath = {"t": float(t_hit), "done": False, "t_hit": float(t_hit), "last": None}
+        self._after_timer.start()
+
+    def _aftermath_tick(self):
+        am = self._aftermath
+        if am is None or self.sim is None:
+            self._after_timer.stop()
+            return
+        now = QtCore.QTime.currentTime().msecsSinceStartOfDay() / 1e3
+        dt = 0.033 if am["last"] is None else max(0.0, min(0.2, now - am["last"]))
+        am["last"] = now
+        warp = 60.0 if self.controls.slowmo.isChecked() else self._warp()
+        am["t"] = am["t"] + dt * warp
+        if am["t"] > am["t_hit"] + SHOW_AFTER:
+            am["done"] = True
+            self._after_timer.stop()
+        self._impact_page(self.t)
 
     def _solar_home(self, on):
         """The Solar System view from the side of its motion around the Milky Way, with the traced paths
@@ -543,7 +711,16 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.solar.set_galactic(None)
             self.solar.reset_camera()
-        _draw(self.p_solar)
+        self._apply_constellations()  # (the home view shows them: the side view's sky, named)
+
+    def _apply_constellations(self, _on=None):
+        """The constellation figures and names: in every view with the Display checkbox, in the Solar System's
+        home view always."""
+        on = self.controls.constellations.isChecked()
+        for scene, p in ((self.solar, self.p_solar), (self.bennu, self.p_bennu), (self.craft, self.p_craft),
+                         (self.earth_moon, self.p_em)):
+            scene.sky.set_constellations(on or (scene is self.solar and self.home.isChecked()))
+            _draw(p)
 
     def _render_all(self, side=True):
         _draw(self.p_solar)
@@ -567,8 +744,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_recalc(self, title, detail="", fraction=None):
         """Blank the 3-D views and say what the physics is computing (title None: show the views again)."""
         if title is None:
-            if self.center.currentIndex() != 0:
-                self.center.setCurrentIndex(0)
+            page = 2 if self._impact_on else 0
+            if self.center.currentIndex() != page:
+                self.center.setCurrentIndex(page)
                 for w in self._side_views:
                     w.setVisible(True)
                 self._render_all()
@@ -601,7 +779,19 @@ class MainWindow(QtWidgets.QMainWindow):
         dt = 0.033 if self._last_tick is None else max(0.0, now - self._last_tick)
         self._last_tick = now
         self._frame += 1
-        self.set_time(self.t + dt * self._warp(), side=self._frame % SIDE_RENDER_EVERY == 0)
+        warp = self._warp()
+        t_new = self.t + dt * warp
+        got = self._impact_track() if self.controls.slowmo.isChecked() else None
+        if got is not None:  # Bennu hits Earth: the last 1,000 km at 5 s/s, the 20 minutes after at 1 min/s
+            imp = got[0]
+            sm = imp.slow_motion(self.t)
+            if sm is not None:
+                t_new = self.t + dt * min(warp, sm[0])
+            for b in (imp.t_hit - SHOW_BEFORE, imp.t_slowmo(), imp.t_hit):  # (a zone is never jumped over)
+                if self.t < b < t_new:
+                    t_new = b
+                    break
+        self.set_time(t_new, side=self._frame % SIDE_RENDER_EVERY == 0)
 
     def _warp(self):
         return SPEEDS[self.controls.speed.currentIndex()][1]
@@ -632,6 +822,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._impact_framed = 0
         self._results_seen = 0
         self.next_dart = self.next_tractor = None
+        self._tr_ahead, self._tr_planned_t, self._tractor_window, self._tr_want_window = None, -np.inf, None, True
+        self._tr_sent = False
+        self._aftermath = None
+        self.distance.set_tractor(None)
         self._next_choice = -1
         self._live_params = self.controls.params()
         self._live_dirty = False
@@ -668,6 +862,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_launch_dart(self):
         self.log.write("action", what="launch DART pressed", live=self.sim is not None, next_dart=self.next_dart)
         if self.sim is None:
+            if self._slider_date.isActive():  # the slider was just dragged: its date first (the plan follows it)
+                self._slider_date.stop()
+                self._slider_to_launch_date()
             if not self._plan_is_current():  # the selected window (or a parameter) is not planned yet
                 self.log.write("action", what="launch waits for the plan of the selected window")
                 self._launch_when_planned = True
@@ -739,10 +936,39 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.write("action", what="tractor not launched", reason="no live run" if self.sim is None else
                            "no tractor plan yet" if self.next_tractor is None else "the tractor plan is not feasible")
             return
-        self.sim.send("launch_tractor", self.next_tractor, self.controls.params())
+        tp = self.next_tractor
+        self.sim.send("launch_tractor", tp, self.controls.params())
+        self.distance.set_tractor(None, tp.path_t, tp.path, self.eph, live=True)  # launched: its flight, no window
         self.next_tractor = None
-        self.controls.set_stage("live", dart_ready=False, tractor_ready=False)
+        self._tr_sent = True  # until the snapshot shows it launched: no re-plan, no second launch
+        self.controls.set_stage("live", dart_ready=self.controls.launch_dart.isEnabled(), tractor_ready=False)
+        self._update_tractor_status(self._last_snap or {})
         self.craft_mode.button(0).setChecked(True)
+
+    def _on_release(self):
+        """End of the tow on command: the tractor lets the boulder go and leaves Bennu (core/mission.py end_tow)."""
+        self.log.write("action", what="release pressed", live=self.sim is not None)
+        if self.sim is not None:
+            self.sim.send("release")
+            self.controls.set_release_ready(False)
+
+    def _tr_args(self):
+        """Arguments of the tractor plan job: the parameters (with the measured beta), the 2135 point reached so
+        far, the launch date (now; before the verdict: the verdict date, so the plan is ready when it comes) and
+        whether to sweep the launch window too (only when the 2135 point changed: it takes a few seconds)."""
+        s = self._last_snap or {}
+        p, b_now, t_now, _ = self._rec_args()
+        t_launch = t_now
+        ki = s.get("impactor") or {}
+        if not s.get("dart_ok") and ki.get("impact") is not None and ki.get("phase") == "impacted":
+            # planned ahead of the verdict: for its date, and for the 2135 point the team expects after this DART
+            # (tracking has not measured its shift yet); the verdict then refreshes the window for the measured one
+            t_launch = max(t_now, float(ki["impact"]["t"]) + GROUND_OD_DAYS * DAY)
+            if ki.get("db_plan") is not None:
+                b_now = b_now + np.asarray(ki["db_plan"], float)
+        want = self._tr_want_window
+        self._tr_want_window = False
+        return p, b_now, t_launch, want
 
     def _rec_args(self):
         s = self._last_snap or {}
@@ -778,65 +1004,124 @@ class MainWindow(QtWidgets.QMainWindow):
         if ip is not None and ip.feasible:
             c = ip.contact or {}
             self.bennu.set_contact(c.get("point_b"))
-        self.controls.set_stage("live", dart_ready=ip is not None and ip.feasible, tractor_ready=False)
+        # (keep the tractor button as it is: this result must not disable a tractor that became ready meanwhile)
+        self.controls.set_stage("live", dart_ready=ip is not None and ip.feasible, tractor_ready=self._tractor_ready(s))
         if self._last_snap is not None:
             self.live_panel.show_snapshot(self._last_snap)
 
+    def _tractor_ready(self, s):
+        """The tractor may launch now: a feasible plan, a successful DART, not launched, no re-simulation."""
+        tp = self.next_tractor
+        return bool(tp is not None and tp.feasible and s.get("dart_ok") and not s.get("tractor_launched")
+                    and s.get("resim") is None and not self._tr_sent)
+
     def _on_tractor_plan(self, out):
-        tp, msg = out
+        tp, msg, window = out
+        s = self._last_snap or {}
         self.log.write("result", what="tractor plan", plan=tp, check=None if msg is None else msg.text,
-                       tractor_launched=(self._last_snap or {}).get("tractor_launched"))
+                       tractor_launched=s.get("tractor_launched"), t_last=None if window is None else window.get("t_last"))
+        if self._tr_sent or s.get("tractor_launched"):
+            return  # (a refresh that finished after the launch: the tractor flies the plan it was launched with)
         self.next_tractor = tp
         self._tractor_check = None if msg is None else msg.text
-        s = self._last_snap or {}
-        self.controls.set_stage("live", dart_ready=False, tractor_ready=tp.feasible and not s.get("tractor_launched"))
-        self.status.showMessage(f"Gravity tractor ready to launch: arrival about {t_to_utc_str(tp.t_arrive)[:10]}"
-                                if tp.feasible else f"The gravity tractor cannot launch: {self._tractor_check or 'no plan'}",
-                                8000)
-        self._update_tractor_hint(s)
+        self._tr_planned_t = float(tp.t_launch)  # the launch date it was planned for (ahead: the verdict date)
+        if window is not None:
+            self._tractor_window = window
+        self.distance.set_tractor(self._tractor_window, tp.path_t if tp.feasible else None,
+                                  tp.path if tp.feasible else None, self.eph, live=True)
+        self.controls.set_stage("live", dart_ready=self.controls.launch_dart.isEnabled(), tractor_ready=self._tractor_ready(s))
+        if s.get("dart_ok"):
+            self.status.showMessage(f"Gravity tractor ready to launch: arrival about {t_to_utc_str(self._tractor_arrival(tp))[:10]}"
+                                    if tp.feasible else f"The gravity tractor cannot launch: {self._tractor_check or 'no plan'}",
+                                    8000)
+        self._update_tractor_status(s)
 
-    def _update_tractor_hint(self, s):
-        """The line under the tractor's launch button: why it can or cannot launch now."""
-        text = self._tractor_hint(s)
-        if text != self.controls.tractor_hint.text():
-            self.controls.tractor_hint.setText(text)
-            self.log.write("hint", tractor=text)
+    @staticmethod
+    def _tractor_arrival(tp):
+        return tp.t_arrive_flight if np.isfinite(getattr(tp, "t_arrive_flight", np.nan)) else tp.t_arrive
 
-    def _tractor_hint(self, s):
+    def _update_tractor_status(self, s):
+        """The coloured strip above the tractor's launch button: why it can or cannot launch now."""
+        colour, text = self._tractor_status(s)
+        if (colour, text) != getattr(self.controls, "_tractor_status", None):
+            self.controls.set_tractor_status(colour, text)
+            self.log.write("hint", tractor=text, colour=colour)
+
+    def _tractor_status(self, s):
+        """(colour, text): red = not available and why; amber = waiting for the verdict; green = ready, with the
+        launch window and the arrival for a launch now; grey = planning mode / launched."""
         if self.sim is None:
-            return "Launches in a live run, after a DART succeeds."
+            return "grey", "Launches in a live run, after a DART succeeds."
         if not s:
-            return ""
+            return "grey", "Starting the live run…"
         if s.get("resim") is not None:
-            return "Flying the mission again with the new settings…"
+            return "amber", "Flying the mission again with the new settings…"
+        tr = s.get("tractor") or {}
+        if self._tr_sent and not s.get("tractor_launched"):
+            return "grey", "<b>Launch ordered:</b> the tractor leaves the parking orbit…"
         if s.get("tractor_launched"):
-            return "Launched."
+            pr = tr.get("prox")
+            where = (f"at Bennu: {pr['phase']}" if pr else f"{tr.get('phase', '')}, arrival {t_to_utc_str(tr['eta'])[:10]}"
+                     if np.isfinite(tr.get("eta", np.nan)) else tr.get("phase", ""))
+            return "grey", f"<b>Launched</b> {t_to_utc_str(tr['t_launch'])[:10]} — {where}."
         results = (s.get("outlook") or {}).get("dart_results") or []
         paused = "" if s.get("running") else " The clock is paused: press ▶ Play."
+        tp = self.next_tractor
         if s.get("dart_ok"):
-            if self.next_tractor is None:
-                return "The DART succeeded: planning the tractor launch…"
-            if not self.next_tractor.feasible:
-                return f"The tractor cannot launch with these settings: {self._tractor_check or 'no feasible plan'}."
-            return f"Ready: launch now, arrival about {t_to_utc_str(self.next_tractor.t_arrive)[:10]}."
+            if tp is None:
+                return "amber", "The DART succeeded: planning the tractor launch…"
+            if not tp.feasible:
+                return "red", f"<b>Not available</b> with these settings: {self._tractor_check or 'no feasible plan'}."
+            w = self._tractor_window
+            until = (f" Launch window open until <b>{t_to_utc_str(w['t_last'])[:10]}</b>."
+                     if w is not None and np.isfinite(w.get("t_last", np.nan)) else
+                     " No later launch closes the gap: launch now." if w is not None else "")
+            return "green", (f"<b>READY:</b> launch now → arrival <b>{t_to_utc_str(self._tractor_arrival(tp))[:10]}</b>."
+                             + until)
         ki = s.get("impactor") or {}
         if results and results[-1]["result"] != "success" and not s.get("dart_in_flight") \
                 and len(results) >= len(s.get("impactors") or []):
             r = results[-1]
-            return (f"DART #{r['number']} {'missed' if r['result'] == 'missed' else 'fell short'} "
-                    f"({100 * r['fraction']:.0f} % of the target; a success needs "
-                    f"{100 * (1 - self.controls.params().dart_tolerance):.0f} %): launch the next DART first.")
-        if ki.get("phase") == "impacted":
-            return "Waiting for the DART's verdict (ground tracking, 30 days after the impact)." + paused
+            return "red", (f"<b>Not available:</b> DART #{r['number']} {'missed' if r['result'] == 'missed' else 'fell short'} "
+                           f"({100 * r['fraction']:.0f} % of the target; a success needs "
+                           f"{100 * (1 - self.controls.params().dart_tolerance):.0f} %). Launch the next DART first.")
+        if ki.get("phase") == "impacted" and ki.get("impact") is not None:
+            due = ki["impact"]["t"] + GROUND_OD_DAYS * DAY
+            ahead = (" The launch is planned for that date." if tp is not None and tp.feasible else "")
+            return "amber", (f"<b>Waiting for the DART's verdict</b> (ground tracking), due "
+                             f"<b>{t_to_utc_str(due)[:10]}</b>.{paused}{ahead}")
         if s.get("dart_in_flight"):
-            return "Available after the DART's verdict, 30 days after its impact."
-        return "Available after a DART succeeds."
+            due = ki.get("t_arrive", np.nan)
+            return "red", ("<b>Not available</b> until the DART's verdict, 30 days after its impact"
+                           + (f" ({t_to_utc_str(due + GROUND_OD_DAYS * DAY)[:10]})." if np.isfinite(due) else "."))
+        return "red", "<b>Not available:</b> launch a DART first; the tractor follows a successful impact."
 
 
     @staticmethod
     def _awaiting_next_dart(s):
         res = (s.get("outlook") or {}).get("dart_results") or []
         return bool(res) and not s.get("dart_ok") and not s.get("dart_in_flight")
+
+    TRACTOR_REFRESH_DAYS = 30.0  # the "launch now" tractor plan is re-made this often while the button is available
+
+    def _tractor_planning(self, s, results):
+        """Keep the tractor plan ahead of the user: planned at the DART impact for the verdict date (ready the instant
+        the verdict says success), then re-planned for "launch now" every 30 mission days while the button is
+        available, so pressing it later flies a plan for that date."""
+        if s.get("tractor_launched") or self._tr_sent or self._tr_busy or s.get("resim") is not None:
+            return
+        ki = s.get("impactor") or {}
+        t = float(s.get("t", self.t))
+        if not s.get("dart_ok") and ki.get("phase") == "impacted" and ki.get("impact") is not None \
+                and len(results) < len(s.get("impactors") or []):
+            key = (ki.get("number"), round(float(ki["impact"]["t"])))
+            if self._tr_ahead != key:  # plan ahead of the verdict, once per impact
+                self._tr_ahead = key
+                self._tr_want_window = True
+                self.tr_job.request()
+            return
+        if s.get("dart_ok") and self.next_tractor is not None and t - self._tr_planned_t > self.TRACTOR_REFRESH_DAYS * DAY:
+            self.tr_job.request()
 
     def _on_snap(self, s):
         if self.sim is None:  # late snapshot of a run that was just ended
@@ -846,7 +1131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if rs is not None:  # the mission is being flown again with new parameters
             self._log_snap(s, [])
             what = rs.get("busy") or rs.get("background")
-            self._update_tractor_hint(s)
+            self._update_tractor_status(s)
             self._set_recalc("Recalculating physics", f"Flying the mission again with the new parameters: "
                              f"{t_to_utc_str(rs['t'])[:10]} of {t_to_utc_str(rs['t1'])[:10]}"
                              + (f"\n{what}" if what else ""), rs["fraction"])
@@ -873,14 +1158,28 @@ class MainWindow(QtWidgets.QMainWindow):
             set_spin_change(*s["spin_change"])
         results = (s.get("outlook") or {}).get("dart_results") or []
         self._log_snap(s, results)
-        self._update_tractor_hint(s)
+        if s.get("complete") and self._aftermath is None:  # the run ended with Bennu hitting Earth: its aftermath
+            t_hit = (s.get("outlook") or {}).get("t_earth_impact", np.nan)
+            if t_hit is not None and np.isfinite(t_hit) and s["t"] >= t_hit - 1.0:
+                self.log.write("action", what="the run ended with the Earth impact: the impact page plays the aftermath")
+                self._start_aftermath(t_hit)
+        self._tractor_planning(s, results)
+        self._update_tractor_status(s)
+        pr = (s.get("tractor") or {}).get("prox")
+        self.controls.set_release_ready(pr is not None and pr["phase"] in ("station", "parked")
+                                        and not s.get("tow_complete"))
         if len(results) > self._results_seen:
             self._results_seen = len(results)
             last = results[-1]
             self.log.write("result", what="DART verdict", number=last.get("number"), result=last["result"],
                            fraction=last.get("fraction"), flyby_ld=last.get("q", 0.0) / 384_400e3)
             if last["result"] == "success":
-                self.status.showMessage("DART succeeded: planning the gravity tractor launch…", 6000)
+                if self._tractor_ready(s):  # planned ahead of the verdict: the button is ready at once
+                    self.controls.set_stage("live", dart_ready=self.controls.launch_dart.isEnabled(), tractor_ready=True)
+                    self.status.showMessage("DART succeeded: the gravity tractor can launch now", 6000)
+                else:
+                    self.status.showMessage("DART succeeded: planning the gravity tractor launch…", 6000)
+                self._tr_want_window = True  # the 2135 point is now measured by tracking: plan and window for it
                 self.tr_job.request()
             else:
                 self.status.showMessage("DART fell short: computing the recommendation for the next DART…", 6000)
@@ -988,7 +1287,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bennu.live = s
                 self.bennu._update_live()
                 self.bennu.reset_camera()
-            elif phase in ("survey", "transfer", "station"):
+            elif phase in ("survey", "transfer", "station", "release", "depart"):
+                self.bennu.reset_camera()
+            elif phase == "departed":  # the tractor has left: back to Bennu itself
+                self.bennu._sc_pos = None
                 self.bennu.reset_camera()
 
     def _end_live(self):
@@ -1009,7 +1311,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._banner = None
         self.bennu.set_banner(None)
         self.controls.set_stage("plan")
-        self._update_tractor_hint(None)
+        self._tr_ahead, self._tr_planned_t, self._tractor_window = None, -np.inf, None
+        self._tr_sent = False
+        self._aftermath = None
+        self._win_key = None
+        self.distance.set_tractor(None)
+        self._update_tractor_status(None)
         self.controls.play.setChecked(False)
         self.info.setCurrentWidget(self.mission)
         self.status.showMessage("Planning mode: the views preview the plan (no physics is run). "
@@ -1282,6 +1589,46 @@ def _smoke_windows(win, app, heavier=2000.0):
     return timer
 
 
+def _smoke_impact(win, app):
+    """Planning mode: 'Jump to… Earth impact 2182', Play at 1 day/s with slow motion on: the centre switches to the
+    impact page, slows down for the last 1,000 km and the 20 minutes after, then returns to the Solar System."""
+    from PySide6.QtTest import QTest
+
+    st = {"i": 0, "shots": set(), "pages": []}
+    win.controls.constellations.setChecked(True)
+
+    def step():
+        st["i"] += 1
+        c = win.controls
+        if st["i"] == 3:
+            k = next(j for j in range(c.jump.count()) if c.jump.itemText(j).startswith("Earth impact"))
+            c.jump.setCurrentIndex(k)
+            c.jump.activated.emit(k)
+            c.speed.setCurrentIndex(3)  # 1 day / s
+            QTest.mouseClick(c.play, QtCore.Qt.LeftButton)
+            return
+        if st["i"] < 3:
+            return
+        page = win.center.currentIndex()
+        if not st["pages"] or st["pages"][-1] != page:
+            st["pages"].append(page)
+        imp = win._impact_track()[0]
+        since = win.t - imp.t_hit
+        for tag, cond in [("approach", page == 2 and since < -3600), ("slowmo", page == 2 and -80 < since < 0),
+                          ("plume", page == 2 and 120 < since < SHOW_AFTER), ("after", page == 0 and since > SHOW_AFTER)]:
+            if cond and tag not in st["shots"]:
+                st["shots"].add(tag)
+                _shot(win, f"app_impact_{tag}")
+        if "after" in st["shots"] or st["i"] > 240:
+            print(f"smoke-impact: pages {st['pages']}, shots {sorted(st['shots'])}", flush=True)
+            app.quit()
+
+    timer = QtCore.QTimer(win)
+    timer.timeout.connect(step)
+    timer.start(250)
+    return timer
+
+
 def _core_budget(argv):
     """--cores N: the budget every process of the app sizes its threads and workers from. It travels to the
     worker processes in BENNU_CORES, so it is set before any of them starts."""
@@ -1322,6 +1669,8 @@ def main():
             keep = _smoke_live(win, app, mode)
     if "--smoke-windows" in sys.argv:
         keep = _smoke_windows(win, app)
+    if "--smoke-impact" in sys.argv:
+        keep = _smoke_impact(win, app)
     if "--smoke" in sys.argv:  # plan, switch tabs, save screenshots, wait for the full-model mass, exit
         def step(i=[0]):
             i[0] += 1

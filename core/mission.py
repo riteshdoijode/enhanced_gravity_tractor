@@ -34,6 +34,8 @@ from core.constants import BENNU, DAY, G, G0, GM, LUNAR_DISTANCE, RADIUS, YEAR
 from core.dart import kepler_state
 from core.dynamics.asteroid import bennu_attitude
 from core.dynamics.gravity import NBody
+from core.earth_impact import SLOWMO_ALT as _EARTH_ALT
+from core.earth_impact import SLOWMO_EARTH as _SLOWMO_EARTH
 from core.estimation.navfilter import NavFilter
 from core.guidance import kepler
 from core.guidance.departure import R_HANDOFF, R_SOI, circular_speed
@@ -56,12 +58,18 @@ SIGMA_BETA_GROUND = 0.1  # beta from the deflected orbit measured by ground trac
 # (time to impact or since it [s], or altitude [m], max warp [s of mission time per s], what is shown)
 SLOWMO_DART = ((10.0, 1.0, "DART: the last seconds before the impact"),
                (300.0, 30.0, "DART: final approach to Bennu"))
+SLOWMO_RANGE = 1000e3  # m: inside this range of Bennu the close-up begins (both craft)
+SLOWMO_RANGE_DART = (5.0, "DART: the last 1,000 km to Bennu")  # ~15 s of wall time at 12 km/s, then the last 10 s
+SLOWMO_RANGE_TRACTOR = (600.0, "Tractor: the last 1,000 km to Bennu")  # 10 min/s until the proximity operations
 SLOWMO_IMPACT = ((40.0, 2.0, "Impact: the flash and the ejecta curtain"),
                  (1200.0, 60.0, "Impact: the ejecta cone spreading"))
 SLOWMO_DESCENT = ((150.0, 90.0, "Tractor: final descent to the boulder"),
                   (np.inf, 300.0, "Tractor: descent toward the boulder"))
+SLOWMO_EARTH_ALT = _EARTH_ALT  # Bennu within 1,000 km of Earth's surface on an impact course: 5 s/s (~80 s)
+SLOWMO_EARTH = _SLOWMO_EARTH[0]
 SLOWMO_CAPTURE = 15.0  # s/s while the arm grabs and stows the boulder (~11 min of mission time)
 SLOWMO_ASCENT = (900.0, 60.0)  # the first 15 minutes of the ascent with the boulder
+TRIM_HOLD_DAYS = 60.0  # the trim has held (tow off, parked) this long: the boulder is released, the tractor leaves
 
 
 @dataclass
@@ -78,6 +86,21 @@ def _rk4(f, t, r, v, h):
     k3 = f(t + h / 2, r + h / 2 * k2[0], v + h / 2 * k2[1])
     k4 = f(t + h, r + h * k3[0], v + h * k3[1])
     return r + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]), v + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+
+
+def _hermite(t, t0, x0, t1, x1):
+    """Cubic Hermite interpolation of a state [r, v] between (t0, x0) and (t1, x1): the position matches r and v
+    at both ends, the velocity is its derivative. Display only: the craft step on their own physical grids, which
+    overshoot the mission clock by up to half a day; the views draw them where they were at the clock's time."""
+    h = t1 - t0
+    if h <= 0:
+        return np.asarray(x1, float).copy()
+    s = float(np.clip((t - t0) / h, 0.0, 1.0))
+    r0, v0, r1, v1 = x0[:3], x0[3:], x1[:3], x1[3:]
+    s2, s3 = s * s, s * s * s
+    r = (2 * s3 - 3 * s2 + 1) * r0 + (s3 - 2 * s2 + s) * h * v0 + (-2 * s3 + 3 * s2) * r1 + (s3 - s2) * h * v1
+    v = ((6 * s2 - 6 * s) * r0 + (3 * s2 - 4 * s + 1) * h * v0 + (-6 * s2 + 6 * s) * r1 + (3 * s2 - 2 * s) * h * v1) / h
+    return np.concatenate([r, v])
 
 
 def _rot_by(vec, raw_axis, ang):
@@ -143,6 +166,7 @@ class LiveMission:
         self.trim = None  # B-plane trim guidance, created when the tractor first reaches its station
         self.tow_start = self.tow_end = np.nan
         self.tow_complete = False
+        self.trim_off_since = np.nan  # when the trim switched the tow off (the hold that ends in the release)
         self.final_check = None  # full-model prediction for the pushes so far (dict)
         self._check_key = None  # the pushes it covers
         self._wait = None  # (why, kind, t) the clock waits for: Bennu's orbit to t, or the 2135 prediction
@@ -286,9 +310,15 @@ class LiveMission:
             self.log(self.t, "mission", "Tractor plan not feasible", "bad")
             return False
         self.tractor_plan = plan
+        # the tractor's settings as they are at the launch (a change before the launch re-plans the tractor
+        # instead of re-flying the mission: the runner hands the parameters over with the launch)
+        self.tractor.mass, self.tractor.thrust = self.p.tractor_mass_kg, self.p.tractor_thrust_n
         self.tractor.set_plan(plan, max(plan.t_launch, self.t))
+        arrive = plan.t_arrive_flight if np.isfinite(getattr(plan, "t_arrive_flight", np.nan)) else plan.t_arrive
         self.log(self.t, "tractor", f"Launch ordered for {t_to_utc_str(self.tractor.t_launch)[:10]}: "
-                                    f"arrival about {t_to_utc_str(plan.t_arrive)[:10]}", "good")
+                                    f"arrival about {t_to_utc_str(arrive)[:10]}"
+                                    + (" (optimized flight plan)" if np.isfinite(getattr(plan, "t_arrive_flight", np.nan))
+                                       else " (quick estimate)"), "good")
         return True
 
     def solar_storm(self, days):
@@ -414,7 +444,7 @@ class LiveMission:
         """Longest step between interleavings of the craft, the tow and the events: set by the physics, never
         by the display speed (the proximity phases couple the tractor's pull every 10 minutes)."""
         pr = self.tractor.prox
-        return 600.0 if pr is not None and pr.phase not in ("station", "parked") else DAY
+        return 600.0 if pr is not None and pr.phase not in ("station", "parked", "departed") else DAY
 
     def slow_motion(self):
         """(max warp, what is shown) while something worth watching happens at Bennu -- the DART's final
@@ -422,9 +452,23 @@ class LiveMission:
         for the real-time runner (which the user can switch off); the physics never uses it."""
         ki = self.impactor
         if ki is not None and ki.phase == "terminal":
-            for t_go, warp, what in SLOWMO_DART:
+            t_go, warp, what = SLOWMO_DART[0]
+            if ki.t_go <= t_go:
+                return warp, what
+            rng_, _ = self.craft_range(ki)
+            if rng_ <= SLOWMO_RANGE:
+                return SLOWMO_RANGE_DART
+            for t_go, warp, what in SLOWMO_DART[1:]:
                 if ki.t_go <= t_go:
                     return warp, what
+        tr = self.tractor
+        if tr.phase == "cruise" and tr.x is not None and np.isfinite(tr.t_launch):
+            rng_, closing = self.craft_range(tr)
+            if rng_ <= SLOWMO_RANGE and closing > 0:
+                return SLOWMO_RANGE_TRACTOR
+        t_hit = self.earth_impact_time()
+        if np.isfinite(t_hit) and t_hit - 3 * DAY < self.t < t_hit and self.earth_altitude()[0] <= SLOWMO_EARTH_ALT:
+            return SLOWMO_EARTH  # Bennu's last 1,000 km into Earth (the 2182 impact page, app/scenes/earth_impact.py)
         if np.isfinite(self.t_impact):
             since = self.t - self.t_impact
             for t_s, warp, what in SLOWMO_IMPACT:
@@ -485,9 +529,45 @@ class LiveMission:
             if stop is not None and stop():
                 return
 
+    def craft_range(self, craft):
+        """(range to Bennu, closing speed) of a heliocentric craft as displayed at the mission clock."""
+        x = craft.state_at(self.t)
+        if x is None:
+            return np.inf, 0.0
+        xb = self.bennu_helio(self.t)[0]
+        rel, vrel = x[:3] - xb[:3], x[3:] - xb[3:]
+        rng_ = float(np.linalg.norm(rel))
+        return rng_, float(-(rel @ vrel) / max(rng_, 1.0))
+
+    def _range_crossing(self, craft):
+        """Predicted time the craft comes inside SLOWMO_RANGE (straight-line estimate, landing half a second inside
+        so the chunk that ends there is already in the close-up), or nan."""
+        rng_, closing = self.craft_range(craft)
+        if not np.isfinite(rng_) or rng_ <= SLOWMO_RANGE or closing <= 0:
+            return np.nan
+        return self.t + (rng_ - SLOWMO_RANGE) / closing + 0.5
+
+    def earth_altitude(self):
+        """(Bennu's altitude above Earth's surface, its descent rate) at the mission clock [m, m/s]."""
+        x = self.bennu_helio(self.t)[0] + self.sun(self.t) - self.eph.state("earth", self.t)
+        r = float(np.linalg.norm(x[:3]))
+        return r - RADIUS["earth"], float(-(x[:3] @ x[3:]) / r)
+
+    def _earth_crossing(self):
+        """Bennu on its way into Earth (the verified orbit hits within 3 days): the predicted time it comes within
+        SLOWMO_EARTH_ALT of the surface (straight-line estimate, half a second inside), or nan."""
+        t_hit = self.earth_impact_time()
+        if not (np.isfinite(t_hit) and self.t < t_hit < self.t + 3 * DAY):
+            return np.nan
+        alt, rate = self.earth_altitude()
+        if alt <= SLOWMO_EARTH_ALT or rate <= 0:
+            return np.nan
+        return min(self.t + (alt - SLOWMO_EARTH_ALT) / rate + 0.5, t_hit - 1.0)
+
     def _craft_events(self):
-        """Times at which a craft changes what it is doing (chunk boundaries)."""
-        out = []
+        """Times at which a craft changes what it is doing (chunk boundaries): a chunk ends exactly where a
+        close-up begins, so a skip stops there too."""
+        out = [self._earth_crossing()]  # (and where Bennu's last 1,000 km to Earth begin)
         ki = self.impactor
         if ki is not None and ki.phase not in ("impacted", "missed"):
             if ki.burn_k < len(ki.burn_times):
@@ -497,6 +577,7 @@ class LiveMission:
             out.append(ki.ip.t_arrive - 2 * DAY + 1.0)
             if ki.phase == "terminal" and np.isfinite(ki.t_go):  # where the slow motion begins
                 out.append(ki.t + ki.t_go - SLOWMO_DART[-1][0])
+                out.append(self._range_crossing(ki))
         tr = self.tractor
         if np.isfinite(tr.t_launch) and tr.phase == "waiting":
             out.append(tr.t_launch + 1.0)
@@ -504,6 +585,8 @@ class LiveMission:
             eta = tr.eta()
             if np.isfinite(eta):
                 out.append(eta - 1.0)
+            if tr.phase == "cruise":
+                out.append(self._range_crossing(tr))
         return out
 
     def _milestones(self):
@@ -616,23 +699,49 @@ class LiveMission:
             self.tow_end = min(self.tow_start + self.p.tow_years * YEAR, self.planner.t_ca - 0.5 * YEAR)
         a_mag = G * pr.mass / pr.d_station**2
         if t1 >= self.tow_end:
-            self.tow_complete = True
-            self.truth.tow_end(t1)
-            self.truth.want_prediction()
-            pr.retarget(pr.e_station, tow_on=False)
-            b = self.trim.b_now(self.defl, t1)
-            self.log(t1, "mission", f"Tow complete (the tractor leaves Bennu): {self.defl.tow_dv * 1e3:,.4f} mm/s delivered over "
-                                    f"{(t1 - self.tow_start) / YEAR:.1f} yr; 2135 flyby now "
-                                    f"{np.linalg.norm(self.planner.b0 + b + self.b_offset) / LUNAR_DISTANCE:.3f} LD "
-                                    "(linear model); Bennu is now flown on with the full force model", "good")
+            self.end_tow(t1, f"the {self.p.tow_years:g}-year tow time is up")
             return
         if t1 >= self.trim.next:
             was_on = self.trim.tow_on
             on, e = self.trim.update(self.defl, t1, a_mag, self.tow_end)
-            pr.retarget(e, tow_on=on)
+            if was_on != on or on:  # the station moves only while towing (parked: stays parked, see core/tow.py)
+                pr.retarget(pr.e_station if e is None else e, tow_on=on)
             if was_on != on:
+                self.trim_off_since = t1 if not on else np.nan
                 self.log(t1, "tractor", "Trim reached: parking 5 km out (tow off)" if not on else
                          "Trim error grew: back on station (tow on)", "good" if not on else "warn")
+        if (not self.trim.tow_on and np.isfinite(self.trim_off_since)
+                and t1 - self.trim_off_since >= TRIM_HOLD_DAYS * DAY):
+            self.end_tow(t1, f"the trim has held for {TRIM_HOLD_DAYS:.0f} days")
+
+    def end_tow(self, t=None, why="released on command"):
+        """End of the tow: the boulder is released and the tractor leaves Bennu (proximity phases release ->
+        depart -> departed, core/proximity/ops.py); Bennu is flown on with the full force model and its prediction
+        is requested. Called when the tow time is up, when the trim has held TRIM_HOLD_DAYS, and by the runner's
+        'release' command. False if there is no tractor on station / parked to release."""
+        t = self.t if t is None else float(t)
+        pr = self.tractor.prox
+        if pr is None or self.tow_complete or pr.phase not in ("station", "parked", "transfer"):
+            self.log(t, "mission", "Nothing to release: the tractor is not holding at Bennu", "warn")
+            return False
+        self.tow_complete = True
+        if not np.isfinite(self.tow_end) or t < self.tow_end:
+            self.tow_end = t
+        self.truth.tow_end(t)
+        self.truth.want_prediction()
+        pr.release()
+        t_log = max(t, pr.t_release) if np.isfinite(pr.t_release) else t  # (the proximity clock may run ahead)
+        if self.trim is not None:
+            b = self.trim.b_now(self.defl, t)
+            years = (t - self.tow_start) / YEAR if np.isfinite(self.tow_start) else 0.0
+            flyby = np.linalg.norm(self.planner.b0 + b + self.b_offset) / LUNAR_DISTANCE
+            self.log(t_log, "mission", f"Tow complete ({why}): boulder released, the tractor leaves Bennu. "
+                                   f"{self.defl.tow_dv * 1e3:,.4f} mm/s delivered over {years:.1f} yr; 2135 flyby now "
+                                   f"{flyby:.3f} LD (linear model); Bennu is now flown on with the full force model", "good")
+        else:
+            self.log(t_log, "mission", f"Tow ended before it began ({why}): boulder released, the tractor leaves Bennu",
+                     "warn")
+        return True
 
     def _aim_shift(self):
         """Aim of the trim tow (a shift from b0 in the linear model): the DART aim distance, on the line the
@@ -749,6 +858,7 @@ class TractorFlight:
         incl = np.radians(28.5)
         self.ex, self.ey = np.array([1.0, 0, 0]), np.array([0, np.cos(incl), np.sin(incl)])
         self.x = None  # geocentric (escape) or heliocentric (cruise) state
+        self._prev = None  # (t, x) before the last integration step, same frame as x (display interpolation)
         self.nav = None
         self.guid = None
         self.prop_used = self.dv_used = 0.0
@@ -782,27 +892,40 @@ class TractorFlight:
             return self.t_arrived
         if self.guid is not None and np.isfinite(self.guid.t_f):
             return self.guid.t_f
-        return self.tp.t_arrive
+        t_flight = getattr(self.tp, "t_arrive_flight", np.nan)  # the optimized flight plan (until the cruise starts)
+        return t_flight if np.isfinite(t_flight) else self.tp.t_arrive
 
-    def geo_position(self):
+    def state_at(self, t=None):
+        """The craft's state (escape: geocentric; cruise: heliocentric) at mission time t, interpolated between
+        its last two integration steps (the steps may end past the mission clock). None: the latest state."""
+        if t is None or self.x is None or self._prev is None or t >= self.t:
+            return self.x
+        t0, x0 = self._prev
+        if t <= t0:
+            return x0
+        return _hermite(t, t0, x0, self.t, self.x)
+
+    def geo_position(self, t=None):
+        t = self.t if t is None else min(t, self.t)
         if self.phase == "waiting":  # circling in the parking orbit (display)
-            th = circular_speed(self.r_park) / self.r_park * self.t
+            th = circular_speed(self.r_park) / self.r_park * t
             return self.r_park * (np.cos(th) * self.ex + np.sin(th) * self.ey)
-        if self.phase == "spiral":
+        if self.phase == "spiral":  # (the spiral steps end on the chunk: no overshoot to interpolate)
             return self.a_sp * (np.cos(self.theta) * self.ex + np.sin(self.theta) * self.ey)
         if self.phase == "escape":
-            return self.x[:3].copy()
+            return self.state_at(t)[:3].copy()
         return None
 
-    def position_bary(self):
-        """Barycentric position for display."""
+    def position_bary(self, t=None):
+        """Barycentric position for display, at mission time t (default: the craft's own time)."""
         e = self.m.eph
-        g = self.geo_position()
+        t = self.t if t is None else min(t, self.t)
+        g = self.geo_position(t)
         if g is not None:
-            return e.pos("earth", self.t) + g
+            return e.pos("earth", t) + g
         if self.phase == "proximity":
-            return self.m.bennu_bary(self.t) + self.prox.x[:3]
-        return self.x[:3] + self.m.sun(self.t)[:3]
+            return self.m.bennu_bary(t) + self.prox.x[:3]
+        return self.state_at(t)[:3] + self.m.sun(t)[:3]
 
     def _thrust_on(self, t):
         return not self.m.safe_mode(t)
@@ -865,6 +988,7 @@ class TractorFlight:
         r = radius * (c * self.ex + s * self.ey)
         v = circular_speed(radius) * (-s * self.ex + c * self.ey)
         self.x = np.concatenate([r, v])
+        self._prev = None
 
     def _escape(self, t1):
         m = self.m
@@ -883,6 +1007,7 @@ class TractorFlight:
             r, v = _rk4(lambda t, rr, vv: (vv, m.grav_geo.accel(t, rr) + a_th), self.t, r, v, h)
             if thrusting:
                 self._consume(self.a_max, h)
+            self._prev = (self.t, self.x)
             self.x = np.concatenate([r, v])
             self.t += h
             if energy >= 0 and np.linalg.norm(r) >= R_HANDOFF:
@@ -893,11 +1018,27 @@ class TractorFlight:
         m = self.m
         xh = self.x + m.eph.state("earth", self.t) - m.sun(self.t)
         self.x = xh
+        self._prev = None  # a new frame: nothing to interpolate with yet
         self.phase = "cruise"
         self.nav = NavFilter(xh + np.concatenate([self.rng.normal(0, SIGMA_R, 3), self.rng.normal(0, SIGMA_V, 3)]),
                              SIGMA_R, SIGMA_V)
         self.guid = LowThrustGuidance(self._approach_point, self.a_max)
         m.log(self.t, "tractor", "Escaped Earth: heliocentric cruise begins")
+        fp = getattr(self.tp, "flight_plan", None)
+        prof = (fp or {}).get("profile") if fp and fp.get("feasible") else None
+        if prof is not None and prof.get("dv") is not None and prof["t_f"] - self.t > 30 * DAY \
+                and abs(fp["params"].tractor_thrust_n / fp["params"].tractor_mass_kg - self.a_max) < 1e-9:
+            # warm start from the ground flight plan the user saw at the launch: refined here from the actual
+            # hand-over state toward the same arrival (a re-plan from scratch only if that fails)
+            self.guid.adopt_profile(prof["t0"], prof["t_f"], prof["dt"], prof["dv"])
+            if self.guid.update(self.t, self.nav.x[:6]):
+                self.replan_pending, self.fail_streak, self.next_update = False, 0, self.t
+                late = (self.t - fp["t_handover"]) / DAY
+                m.log(self.t, "tractor", f"Flight plan: the ground profile, arrival {t_to_utc_str(self.guid.t_f)[:10]}"
+                                         + (f" (hand-over {late:+.0f} d from the plan)" if abs(late) >= 1 else ""), "good")
+                m.eta_history.append((self.t, self.guid.t_f))
+                return
+            m.log(self.t, "tractor", "The ground flight plan no longer fits from here: re-planning", "warn")
         self._replan("Flight plan")
 
     # ---------------------------------------------------------------- cruise
@@ -978,6 +1119,7 @@ class TractorFlight:
             self.nav.x[:6] = np.concatenate([re, ve])
             self.nav.propagate_bias(h)
             self.nav.predict_cov(h, re, MU_S, THRUST_ERR * max(np.linalg.norm(a_cmd), 1e-9))
+            self._prev = (self.t, self.x)
             self.x = np.concatenate([r, v])
             self._consume(np.linalg.norm(a_cmd), h)
             self.t += h
@@ -1002,6 +1144,7 @@ class ImpactorFlight:
         self.phase = "parking"
         self.t = m.t
         self.x = None  # heliocentric state (cruise, terminal)
+        self._prev = None  # (t, x) before the last integration step (display interpolation)
         self.nav = None
         self.dv_used = self.prop_used = 0.0
         self.burn_k = 0
@@ -1029,12 +1172,24 @@ class ImpactorFlight:
         """Current geocentric conic (display): perigee radius and speed, plane."""
         return {"r_p": self.rp.r_park, "v_p": self.v_p, "P": self.rp.P_hat, "Q": self.rp.Q_hat}
 
-    def position_bary(self):
+    def state_at(self, t=None):
+        """Heliocentric state (cruise, terminal) at mission time t, interpolated between the last two integration
+        steps (the 12-hour cruise steps end past the mission clock). None: the latest state."""
+        if t is None or self.x is None or self._prev is None or t >= self.t:
+            return self.x
+        t0, x0 = self._prev
+        if t <= t0:
+            return x0
+        return _hermite(t, t0, x0, self.t, self.x)
+
+    def position_bary(self, t=None):
+        """Barycentric position for display, at mission time t (default: the craft's own time)."""
+        t = self.t if t is None else min(t, self.t)
         if self.phase in ("parking", "raising", "departing"):
-            return self.m.eph.pos("earth", self.t) + self.geo_state()[0]
+            return self.m.eph.pos("earth", t) + self.geo_state(t)[0]
         if self.phase == "impacted":
-            return self.m.bennu_bary(self.t)
-        return self.x[:3] + self.m.sun(self.t)[:3]
+            return self.m.bennu_bary(t)
+        return self.state_at(t)[:3] + self.m.sun(t)[:3]
 
     def burns_done(self):
         return self.burn_k
@@ -1103,6 +1258,7 @@ class ImpactorFlight:
         r, v = self.geo_state()
         e = m.eph.state("earth", self.t) - m.sun(self.t)
         self.x = np.concatenate([e[:3] + r, e[3:] + v])
+        self._prev = None
         self.nav = NavFilter(self.x + np.concatenate([self.rng.normal(0, SIGMA_R, 3), self.rng.normal(0, SIGMA_V, 3)]),
                              SIGMA_R, SIGMA_V)
         self.phase = "cruise"
@@ -1167,6 +1323,7 @@ class ImpactorFlight:
             self.nav.x[:6] = np.concatenate([re, ve])
             self.nav.propagate_bias(h)
             self.nav.predict_cov(h, re, MU_S, THRUST_ERR * max(np.linalg.norm(a), 1e-9))
+            self._prev = (self.t, self.x)
             self.x = np.concatenate([r, v])
             self.dv_used += np.linalg.norm(a) * h
             # impact detection: closest approach of the straight segment relative to Bennu
@@ -1224,20 +1381,25 @@ class ImpactorFlight:
 
 
 def _common(m, craft):
-    recent = [p for t, p in craft.trail if t > m.t - 3 * YEAR]  # the last three years (decades at Bennu clutter)
-    s = {"phase": craft.phase, "pos": craft.position_bary(), "dv_used": craft.dv_used, "prop_used": craft.prop_used,
-         "trail": np.array(recent + [craft.position_bary()]) if recent else None,
+    """The craft as the views draw it: everything evaluated at the mission clock m.t (the craft's own integration
+    step may end up to half a day later; drawing it there while Earth and Bennu are drawn at m.t made it freeze
+    and jump at slow warps)."""
+    pos = craft.position_bary(m.t)
+    recent = [p for t, p in craft.trail if m.t - 3 * YEAR < t <= m.t]  # the last three years (decades at Bennu clutter)
+    s = {"phase": craft.phase, "pos": pos, "dv_used": craft.dv_used, "prop_used": craft.prop_used,
+         "trail": np.array(recent + [pos]) if recent else None,
          "last_measurement": craft.last_measurement, "name": craft.name}
     if craft.nav is not None and craft.phase not in ("proximity", "impacted", "missed"):
         s["nav_err"] = float(np.linalg.norm(craft.nav.x[:3] - craft.x[:3]))
         s["nees"] = craft.nav.nees(craft.x)
         s["nav_sigma"] = craft.nav.sigma()[0]
-    xb = m.bennu_helio(m.t)[0]
     if craft.x is not None and craft.phase in ("cruise", "terminal"):
-        s["range"] = float(np.linalg.norm(craft.x[:3] - xb[:3]))
-        s["rel_speed"] = float(np.linalg.norm(craft.x[3:] - xb[3:]))
-        s["vel_helio"] = craft.x[3:].copy()
-        s["rel_bennu"] = craft.x[:3] - xb[:3]
+        xb = m.bennu_helio(m.t)[0]
+        x = craft.state_at(m.t)
+        s["range"] = float(np.linalg.norm(x[:3] - xb[:3]))
+        s["rel_speed"] = float(np.linalg.norm(x[3:] - xb[3:]))
+        s["vel_helio"] = x[3:].copy()
+        s["rel_bennu"] = x[:3] - xb[:3]
     return s
 
 
@@ -1251,7 +1413,7 @@ def _tractor_snapshot(m, craft):
     if craft.prox is not None:
         s["prox"] = craft.prox.snapshot()
         s["thrusting"] = bool(np.any(craft.prox.u)) and not m.safe_mode(m.t)
-    g = craft.geo_position()
+    g = craft.geo_position(m.t)
     if g is not None:
         s["geo"] = g
     gd = craft.guid
@@ -1274,9 +1436,10 @@ def _impactor_snapshot(m, craft):
              burns_total=len(craft.rp.burns), next_burn=(craft.burn_times[craft.burn_k]
                                                           if craft.burn_k < len(craft.burn_times) else np.nan),
              t_raise_start=craft.rp.t_start, prop_plan=craft.rp.propellant_kg, dv_plan=craft.rp.dv_total,
-             v_dep=craft.rp.v_dep, v_inf=craft.rp.v_inf, contact=ip.contact, impact_speed_plan=ip.impact_speed)
+             v_dep=craft.rp.v_dep, v_inf=craft.rp.v_inf, contact=ip.contact, impact_speed_plan=ip.impact_speed,
+             db_plan=None if ip.db is None else np.asarray(ip.db, float).copy())  # the 2135 shift the team expects
     if craft.phase in ("parking", "raising", "departing"):
-        r, v = craft.geo_state()
+        r, v = craft.geo_state(min(m.t, craft.t))
         s["geo"], s["geo_vel"] = r, v
         s["orbit"] = craft.orbit()
         s["v_perigee"] = craft.v_p
@@ -1302,6 +1465,7 @@ def snapshot(m):
         "curve_version": m.curve_version, "complete": m.complete(), "t_end": m.t_end,
         "tractor_launched": bool(np.isfinite(m.tractor.t_launch)),
         "dart_in_flight": bool(m.impactor is not None and m.impactor.phase not in ("impacted", "missed")),
+        "tow_complete": bool(m.tow_complete), "tow_end": m.tow_end,
     }
     s["impactor"] = s["impactors"][-1] if s["impactors"] else None
     return s

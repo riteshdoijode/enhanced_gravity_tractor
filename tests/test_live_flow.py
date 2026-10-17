@@ -94,7 +94,7 @@ def test_slow_motion_at_the_impact(ks):
         if not seen or seen[-1] != (z[0] if z else None):
             seen.append(z[0] if z else None)
         m.advance(m.t + (z[0] * 0.05 if z else DAY))  # 20 frames per second at the slow-motion warp
-    assert seen == [30.0, 1.0, 2.0, 60.0, None]
+    assert seen == [30.0, 5.0, 1.0, 2.0, 60.0, None]  # 5 s/s: inside 1,000 km (SLOWMO_RANGE_DART)
     m.close()
 
 

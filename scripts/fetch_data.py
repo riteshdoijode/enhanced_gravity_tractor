@@ -1,7 +1,8 @@
-"""Step 1 data fetch: JPL ephemerides, Bennu SBDB record, NASA 3D models, textures.
+"""Step 1 data fetch: JPL ephemerides, Bennu SBDB record, NASA 3D models, textures, the star sky.
 
-    uv run python -m scripts.fetch_data            # everything (~150 MB download)
+    uv run python -m scripts.fetch_data            # everything (~155 MB download)
     uv run python -m scripts.fetch_data --skip-large   # skip the 77 MB TAG-site patch (Step 5)
+    uv run python -m scripts.fetch_data --only sky     # stars and constellations (d3-celestial, 5.5 MB) -> assets/sky.npz
 """
 
 import argparse
@@ -128,14 +129,13 @@ def cache_textures():
     examples.load_globe_texture()
     planets.download_sun_surface(texture=True)
     planets.download_moon_surface(texture=True)
-    examples.download_cubemap_space_4k()
     print("  pyvista textures cached")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--skip-large", action="store_true", help="skip the 77 MB TAG-site model")
-    p.add_argument("--only", choices=["ephem", "sbdb", "assets"], default=None)
+    p.add_argument("--only", choices=["ephem", "sbdb", "assets", "sky"], default=None)
     p.add_argument("--bodies", nargs="*", default=None, help="with --only ephem: fetch just these bodies")
     args = p.parse_args()
     DATA_DIR.mkdir(exist_ok=True)
@@ -163,6 +163,13 @@ def main():
         if "bennu_tagsite_v020.glb" in paths:
             print("Processing the Nightingale TAG-site model (capture site):")
             print(json.dumps(process_tagsite(paths["bennu_tagsite_v020.glb"]), indent=2))
+    if args.only in (None, "sky"):
+        from core.sky import SKY_FILES, SKY_URL, process_sky
+
+        print("Star sky (d3-celestial: XHIP stars to magnitude 8, IAU constellations):")
+        for name in SKY_FILES:
+            download(name, SKY_URL + name)
+        print(json.dumps(process_sky(RAW), indent=2))
 
 
 if __name__ == "__main__":

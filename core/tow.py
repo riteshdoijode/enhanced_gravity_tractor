@@ -12,7 +12,9 @@ Trim guidance (closed outer loop, re-evaluated at least weekly on the latest def
 shifts relative to the scenario point b0:
   * "aim" (default: place the flyby at the DART aim point b_aim): tow along the steepest descent of the
     error, e = B(t)^T (b_aim - b) / |...|, for the time that minimizes the error along e,
-    tau = (err . B e) / (a |B e|^2), then stop: the tractor parks 5 km out where its pull is ~1 %.
+    tau = (err . B e) / (a |B e|^2), then stop: the tractor parks 5 km out where its pull is ~1 %. Parked, it
+    keeps its direction and resumes only if the error grows to TOW_RESUME_DAYS of towing (hysteresis); after
+    TRIM_HOLD_DAYS of holding the mission releases the boulder and the tractor leaves (core/mission.py).
   * "maximize": push along the current miss direction w = b / |b|, e(t) = B(t)^T w / |B(t)^T w|.
 
 Nonlinear verification. The scenario orbit is linear in a tiny offset before t_pre (60 days before the 2135
@@ -125,6 +127,9 @@ def pull_on_bennu(m_tractor, rho):
 class TrimGuidance:
     """Outer-loop B-plane guidance for the tow (see module docstring). Shifts are relative to b0."""
 
+    ERR_FLOOR = 100.0  # m on the B-plane: below this the aim is reached and the direction is not re-derived
+    TOW_RESUME_DAYS = 3.0  # a parked tow resumes only if the error grows to this many days of towing
+
     def __init__(self, planner, mode, aim_shift=None, period=7 * DAY):
         self.pl = planner
         self.mode = mode  # "aim" or "maximize"
@@ -163,11 +168,23 @@ class TrimGuidance:
             err = self.b_aim - b
             Bt = self.B(t)
             g = Bt.T @ err  # steepest descent of |b_aim - b|^2: never wastes the tow on weak directions
-            self.e = g / max(np.linalg.norm(g), 1e-30)
-            Be = Bt @ self.e
+            gn = float(np.linalg.norm(g))
+            e_new = g / gn if gn > 0 else None
+            Be = Bt @ e_new if e_new is not None else np.zeros(2)
             tau = max(0.0, err @ Be) / max(a_mag * (Be @ Be), 1e-30)  # tow time minimizing the error along e
             self.dv_needed = a_mag * tau
-            self.tow_on = tau > 0.5 * DAY and t < t_end  # less than half a day of tow left: stop
+            # Hysteresis: the tow stops with less than half a day of towing left; it resumes only if the error grows
+            # to TOW_RESUME days of towing. Parked 5 km out the tractor still pulls ~1 % of the station's pull, so
+            # the error creeps by half a day of tow every ~50 days: without the hysteresis the law went back on
+            # station for a day (a 175-degree transfer, pulling the other way), parked again, and so on every week.
+            resume = self.TOW_RESUME_DAYS * DAY if not self.tow_on else 0.5 * DAY
+            self.tow_on = tau > resume and t < t_end
+            # The direction only changes while the tow is on and the error is real. Once the aim is reached (or an
+            # overshoot is held) err is numerical noise of a few metres, and g / |g| flips sign from week to week:
+            # steering the parked tractor by it sent it on long transfers around Bennu. (e stays None when there is
+            # nothing to tow at all: the caller keeps the station where it is.)
+            if e_new is not None and (self.e is None or (self.tow_on and np.linalg.norm(err) > self.ERR_FLOOR)):
+                self.e = e_new
             # deadbeat: tow exactly the time needed (re-checked at least weekly), then re-evaluate
             self.next = t + (min(self.period, max(tau, 0.25 * DAY)) if self.tow_on else self.period)
         else:

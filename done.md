@@ -1,6 +1,6 @@
 # What we have done so far
 
-A record of this chat session (October 15–16, 2026): the Bennu planetary-defense simulator for
+A record of this chat session (October 15–17, 2026): the Bennu planetary-defense simulator for
 Autonomous Space Robotics (NYU, Fall 2026, Prof. Benjamin Riviere). Steps 1–7 of 8 are complete, and the
 mission goal was then changed to the 2135 keyhole scenario (section 2, last entry). Step 8 remains. Project 1
 is due 10/19.
@@ -387,7 +387,8 @@ as in the picture you shared, with the paths the Sun and planets trace. Click it
   direction and the 60.2° tilt.
 
 **Noticed.** The view's background is a decorative space image, not the real sky: its Milky Way band does not lie
-along the Galactic plane (in your picture the real band runs horizontally behind the Solar System).
+along the Galactic plane (in your picture the real band runs horizontally behind the Solar System). *Since
+October 17 the background is the real star sky; see "Fixes and features" below.*
 
 **Fixed on the way.** Rebuilding a 3-D scene (the Sun-wobble ×30 checkbox, Bennu's gravity colouring) left the old
 labels and overlay text on screen, frozen, beside the new ones: they are now removed.
@@ -426,6 +427,70 @@ setting change during a run triggers:
 text, whether it was enabled), parameter changes, the launch buttons' state changes and what made them, what a
 launch press did or why not, the commands to the simulation, verdicts and plans, the mission's events, a state
 summary, and every error. Send me (or just tell me) the session's time and I can read it directly.
+
+### Fixes and features (October 17, from your list)
+
+Before any edit the project was put under git: commit "Checkpoint before fixes (2026-10-17)", tag
+`checkpoint-2026-10-17` (`git diff checkpoint-2026-10-17` shows everything below).
+
+**Fixed:**
+- **"The spacecraft moves back and forth" at slow speeds.** It was the display, not the guidance. The DART and
+  the tractor integrate on their own 12-hour grid, which ends past the mission clock. The views drew them at
+  the end of their step while Earth and Bennu were drawn at the clock: at 10 min/s the craft froze for ~70 s,
+  then jumped half a day. They are now drawn at the clock, interpolated between their last two states; the
+  physics is unchanged.
+- **The tractor re-parked every week after the trim.** Two causes:
+  - with the aim reached, the trim direction was numerical noise that flipped each week, and each flip
+    moved the parking point to the other side of Bennu;
+  - parked 5 km out, the tractor's ~1 % pull re-armed the tow every ~50 days.
+
+  Parked now stays parked.
+- **No way to end the tow.** New **⤒ Release the boulder and end the tow** button. The boulder is left where
+  the craft is; the craft holds 30 min, climbs to 50 km, burns 0.5 m/s and leaves. Bennu is then flown on with
+  the full force model. The tow also ends by itself after `tow_years`, or once the trim has held for 60 days.
+- **A different launch date gave the same run.** New **Launch no earlier than** date in the DART section,
+  bound to the time slider (dragging the slider sets it; Play and Jump do not). The plan, the markers and
+  Launch DART follow it. A date before a window's best arc leaves the plan exactly as it was: the porkchop's
+  4-day grid is now anchored at the window's start.
+- **Slow DART arcs.** A late launch in a window could pick a 0.65–1.1 km/s impact (a 1.3 t DART), and a live
+  run had recommended a 0.8 km/s DART #2. β is only known for impacts of several km/s, so arcs must now hit
+  at ≥ 3 km/s.
+- **Tractor launch unclear.** A coloured status strip above the button: red (not available, and why), amber
+  (waiting for the verdict, due date), green (READY: arrival, launch window open until …), grey (launched).
+  - The tractor is planned at the DART's impact for the verdict date, so the button is ready the instant
+    the verdict says success. It is re-planned for "launch now" every 30 mission days.
+  - A next-DART recommendation arriving late could disable it; it no longer does.
+  - Tractor-only setting changes before the launch re-plan the tractor instead of re-flying the mission.
+- **The tractor flies the plan you saw.** At the hand-over its guidance starts from the ground's optimized
+  profile. In the tests it arrives within half an hour of the planned date.
+
+**New:**
+- **Blue tractor launch window** on the distance plot: a band over the launch dates that still reach Bennu in
+  time to close the gap, and the planned flight's Earth distance; Bennu's curve is now orange. The tractor's
+  path in the Solar System view is blue too.
+- **Slow motion from 1,000 km**: the DART's last 1,000 km at 5 s/s, the tractor's at 10 min/s.
+- **The real star sky** in every view: 41,411 stars to magnitude 8 at their J2000 positions, coloured by B−V
+  (d3-celestial, BSD-3: XHIP stars, IAU constellation figures). The Milky Way now lies along the Galactic plane,
+  which answers the note above about the decorative background. **Constellations** (Display) draws the 88
+  figures and names; the 🏠 side view always shows them.
+- **Bennu hits Earth in 2182.** A centre page, shown in the last two days before the impact and the 20 minutes
+  after (in planning mode, or a live run whose orbit still hits); `uv run python -m app.impact_show` plays it on
+  its own.
+  - It shows Bennu's track, the last 1,000 km at 5 s/s, a flash and a ballistic plume (display model), and the
+    numbers from Collins, Melosh & Marcus (2005), checked against the paper: 57.8° S 61.8° E in the open southern
+    Indian Ocean, at night; 12.68 km/s at 76°; 1,408 Mt; breakup at 72 km with no airburst; a ~6.8 km cavity in
+    the water.
+  - Their fireball formula applies only above 15 km/s, so none is quoted; the tsunami is not modelled.
+
+**Checked:**
+- All app smoke runs, each pressing the real buttons:
+  - `--smoke` (planning);
+  - `--smoke-live`;
+  - `--smoke-prox`: DART #1 fell short, DART #2 succeeded, the tractor was ready the second the verdict came,
+    then capture, trim, parked, released after 60 days, departed, 2135 flyby at 1.36 LD, "Earth is safe";
+  - `--smoke-impact` (new: the impact page in planning playback).
+- New tests: test_display_interp, test_trim_hold, test_release, test_tractor_window, test_earliest_launch,
+  test_sky, test_earth_impact.
 
 ---
 
@@ -622,6 +687,10 @@ recommendation fills the controls). ⏩ **Verify and run to the end** shows the 
   back (the sensitivity is linearized about the scenario orbit).
 - **Verification noise:** the full-model check of a deflection has a ~150 km noise floor at 2135 (fine for a
   1 LD goal, too coarse to resolve the 3 km keyhole itself).
+- **Earth impact:** the numbers are the Earth Impact Effects Program's first-order scalings; the plume and the
+  flash are display models; no tsunami. The site's ocean/land is read from the Earth texture.
+- **Star sky:** positions at J2000, without proper motion (stars move up to ~10″/yr, a fraction of a pixel by
+  2182 for all but a handful).
 
 ## 8. Next: Step 8
 

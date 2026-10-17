@@ -121,9 +121,19 @@ def job_launch_plan(p, t_now):
     return _strip(opps), ip
 
 
-def job_tractor(p, b_now, t_now):
-    """The tractor launched now: quick plan, optimized flight plan, tow window and reach."""
-    return _W["pl"].plan_tractor_launch(p, t_now, b_now)
+def job_tractor(p, b_now, t_launch, with_window=True):
+    """The tractor launched at t_launch (now, or the verdict date when planned ahead of it): quick plan, optimized
+    flight plan (the live run's warm start), tow window and reach; with the launch window (the dates from t_launch
+    on that still reach Bennu in time to close the gap: the blue band of the distance plot)."""
+    pl = _W["pl"]
+    tp, msg = pl.plan_tractor_launch(p, t_launch, b_now)
+    window = pl.tractor_launch_window(p, t_launch, b_now) if with_window else None
+    return tp, msg, window
+
+
+def job_tractor_window(p, t_from, b_now):
+    """Planning mode: the tractor launch window from the planned verdict date, for the DART's planned shift."""
+    return _W["pl"].tractor_launch_window(p, t_from, np.asarray(b_now, float))
 
 
 class ComputePool:

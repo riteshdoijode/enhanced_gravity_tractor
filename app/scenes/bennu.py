@@ -275,7 +275,11 @@ class BennuScene(SceneBase):
         else:
             self.live_line("live_lidar", None, "#ff3b6b")
         self.live_marker("live_site", np.asarray(pr["site"], float), "#ff5a36", 9)
-        self.live_marker("live_station", np.asarray(pr["station"], float), "#199e70", 9)
+        leaving = pr["phase"] in ("release", "depart", "departed")  # the tow is over: no station to mark
+        self.live_marker("live_station", None if leaving else np.asarray(pr["station"], float), "#3987e5", 9)
+        free = pr.get("boulder_free")
+        self.live_marker("live_boulder_free", None if free is None or np.linalg.norm(rho) < 2e3 else np.asarray(free, float),
+                         "#c8b89a", 7)  # the released boulder, seen from afar (the mesh itself is in the geoms)
         phase = pr["phase"] + (f" · {pr['capture_stage']}" if pr.get("capture_stage") else "")
         self._d["live_labels"] = ([f"Gravity tractor ({phase})"], "white", 11)
         self.set_label_points("live_labels", [rho + np.array([0, 0, max(8.0, 0.02 * np.linalg.norm(rho))])])

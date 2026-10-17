@@ -21,9 +21,8 @@ _TEX = {}
 
 
 def textures():
-    """Cubemap and planet textures, loaded once per process (shared by every scene)."""
+    """Planet textures, loaded once per process (shared by every scene)."""
     if not _TEX:
-        _TEX["cubemap"] = examples.download_cubemap_space_4k()
         _TEX["earth"] = examples.load_globe_texture()
         _TEX["moon"] = planets.download_moon_surface(texture=True)
         _TEX["sun"] = planets.download_sun_surface(texture=True)
@@ -84,8 +83,13 @@ def geom_mesh(gtype, size, mesh=None):
 
 
 class SceneBase:
+    SKY_FRAME = None  # rotation ICRF -> scene axes of the star sky (None: the scene is in ICRF axes)
+
     def __init__(self, plotter):
+        from app.scenes.sky import SkyLayer
+
         self.pl = plotter
+        self.sky = SkyLayer(plotter, self.SKY_FRAME)  # the real sky behind the scene (app/scenes/sky.py)
         self.t = None
         self.live = None
         self._a = {}  # actors
@@ -93,7 +97,7 @@ class SceneBase:
         self._labels, self._texts, self._light = {}, {}, None
         self.tex = textures()
 
-    def reset_scene(self, skybox=True):
+    def reset_scene(self):
         self.pl.clear_actors()
         for prop in [lab.actor for lab in self._labels.values()] + list(self._texts.values()):
             self.pl.renderer.RemoveViewProp(prop)  # labels and overlay text are not PyVista actors: a rebuild left
@@ -103,9 +107,7 @@ class SceneBase:
         self._labels = {}
         self._texts = {}
         self._light = None
-        if skybox:
-            self.pl.add_actor(self.tex["cubemap"].to_skybox(), name="skybox", render=False)
-        self.pl.set_background("black")
+        self.pl.set_background("black")  # (drawn behind it: the star sky, in its own renderer)
 
     # ---- labels: one persistent 2-D overlay per key, moved in place (re-creating label actors every frame
     # cost ~1 ms each plus a render on the GUI thread)

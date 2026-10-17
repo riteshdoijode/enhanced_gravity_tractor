@@ -9,8 +9,9 @@ physics itself. If it cannot keep up (a long proximity phase at a high warp, or 
 integrated), the clock goes only as far as the physics has computed: the snapshot says so ("behind", or
 "busy" while it waits) and the UI shows "computing" / "recalculating" instead of guessing.
 
-Commands: pause/resume, warp, launch a DART or the tractor, solar storm, proximity controller, skip to the next
-event, run to the end. Launches and storms are recorded with their mission times.
+Commands: pause/resume, warp, launch a DART or the tractor, solar storm, proximity controller, release the boulder
+(end of the tow), skip to the next event, run to the end. Launches, storms and the release are recorded with
+their mission times.
 
 Re-simulation ("resim", params, dart_plan, t_start, t_back): when a parameter changes during a run, the whole
 mission is flown again from its start with the new parameters, replaying the recorded commands at their times
@@ -37,6 +38,7 @@ from core.mission import snapshot, verified_curve
 
 SNAP_PERIOD = 0.05  # s between snapshots
 RESIM_BUDGET = 0.25  # s of computing between progress snapshots while re-simulating
+STALE_TRACTOR_PLAN_DAYS = 45.0  # a tractor plan older than this at the launch is re-planned for a launch now
 
 
 class LiveRunner:
@@ -88,11 +90,18 @@ class LiveRunner:
             if len(args) > 1 and args[1] is not None:
                 m.p = args[1]
             plan = args[0]
-            if plan is None or plan.t_launch < m.t - 5 * DAY:  # planned earlier: re-plan for a launch now
+            # The UI keeps its plan fresh (re-planned for "launch now" every 30 mission days while the button is
+            # available), so the plan the user saw is the one that flies; this re-plan is only a safety net for a
+            # plan that has gone stale (never silently for a plan a few days old)
+            if plan is None or plan.t_launch < m.t - STALE_TRACTOR_PLAN_DAYS * DAY:
                 plan, _ = m.planner.plan_tractor_launch(m.p, m.t, m.b_now_abs())
             state = self._state(m)
             if m.launch_tractor(plan):
                 self._record("launch_tractor", plan, **state)
+                self.running = True
+        elif name == "release":  # end of the tow: the boulder is let go, the tractor leaves Bennu
+            if m.end_tow():
+                self._record("release", None)
                 self.running = True
         elif name == "skip":
             self.skip_to = m.next_event_time()
@@ -201,6 +210,9 @@ class LiveRunner:
         elif name == "controller":
             m.set_prox_controller(c["arg"])
             self._record("controller", c["arg"])
+        elif name == "release":
+            if m.end_tow():
+                self._record("release", None)
 
     @staticmethod
     def _same_state(c, m, dart_only=False):

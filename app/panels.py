@@ -99,6 +99,26 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.opportunity.setToolTip("Launch opportunities at Bennu's close passes to Earth (markers on the\n"
                                     "Earth–Bennu distance plot; click a marker to select it)")
         il.addWidget(self.opportunity)
+        # the earliest launch: the plan (porkchop) only uses launches from this date on (+40 days of orbit raising);
+        # two-way bound to the time slider (main.py: the slider dragged by hand sets it, a new date moves the clock)
+        drow = QtWidgets.QHBoxLayout()
+        drow.addWidget(QtWidgets.QLabel("Launch no earlier than"))
+        self.launch_after = QtWidgets.QDateEdit()
+        self.launch_after.setDisplayFormat("yyyy-MM-dd")
+        self.launch_after.setCalendarPopup(True)
+        lo_date = QtCore.QDate.fromString(t_to_utc_str(t_lo)[:10], "yyyy-MM-dd")
+        self.launch_after.setDateRange(lo_date, QtCore.QDate.fromString(t_to_utc_str(t_hi)[:10], "yyyy-MM-dd"))
+        self.launch_after.setDate(QtCore.QDate.fromString(d.earliest_launch, "yyyy-MM-dd"))
+        self.launch_after.setToolTip("The DART is planned for launches from this date on (its orbit raising starts\n"
+                                     "here at the earliest): the best arc of the selected window after it, or the\n"
+                                     "recommended window still open. Setting it moves the clock to that date.")
+        drow.addWidget(self.launch_after, 1)
+        il.addLayout(drow)
+        self.follow_slider = QtWidgets.QCheckBox("follow the time slider")
+        self.follow_slider.setChecked(True)
+        self.follow_slider.setToolTip("Dragging the time slider by hand sets the earliest launch to the slider's date\n"
+                                      "(Play and Jump to… do not change it). Off: the date stays where you set it.")
+        il.addWidget(self.follow_slider)
         mrow = QtWidgets.QHBoxLayout()
         self.use_rec = QtWidgets.QCheckBox("Use recommended mass")
         self.use_rec.setChecked(True)
@@ -137,10 +157,21 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.launch_tractor = QtWidgets.QPushButton("🚀  Launch gravity tractor")
         self.launch_tractor.setStyleSheet("font-weight: 700; padding: 6px;")
         self.launch_tractor.setToolTip("Available once a DART impact has succeeded (shown after ground tracking)")
-        self.tractor_hint = QtWidgets.QLabel("Launches in a live run, after a DART succeeds.")
-        self.tractor_hint.setWordWrap(True)
-        self.tractor_hint.setStyleSheet("color: #c3c2b7;")
-        for w in (self.thrust, self.objective, self.boulder, self.tow, self.hover, self.launch_tractor, self.tractor_hint):
+        # the status strip above the button: red (not available: why), amber (waiting for the verdict),
+        # green (ready: launch window and arrival) -- set_tractor_status()
+        self.tractor_status = QtWidgets.QLabel()
+        self.tractor_status.setWordWrap(True)
+        self.tractor_status.setTextFormat(QtCore.Qt.RichText)
+        self.tractor_status.setMargin(5)
+        self.tractor_status.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.set_tractor_status("grey", "Launches in a live run, after a DART succeeds.")
+        self.release = QtWidgets.QPushButton("⤒  Release the boulder and end the tow")
+        self.release.setToolTip("End of the tow: the tractor lets the boulder go where it is, climbs to 50 km and leaves\n"
+                                "Bennu; Bennu is then flown on with the full force model. Available while the tractor\n"
+                                "holds its station (towing or parked). The tow also ends by itself when its time is up\n"
+                                "or once the trim has held for 60 days.")
+        for w in (self.thrust, self.objective, self.boulder, self.tow, self.hover, self.tractor_status,
+                  self.launch_tractor, self.release):
             trl.addWidget(w)
         lay.addWidget(box)
 
@@ -175,9 +206,13 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.galactic_slow = QtWidgets.QCheckBox("🏠 side view: slow the Galactic motion ×1/50 (shows the helices)")
         self.galactic_slow.setToolTip("Display only. The Solar System moves 52 AU per year around the Milky Way, so the\n"
                                       "planets' true paths are long, stretched helices; slowed 50 times, the turns show.")
+        self.constellations = QtWidgets.QCheckBox("Constellations (figures and names) in every view")
+        self.constellations.setToolTip("The sky behind the views is the real one (stars to magnitude 8, at their J2000\n"
+                                       "positions and colours); this draws the 88 IAU constellations on it. The 🏠 side\n"
+                                       "view of the Solar System always shows them.")
         self.unlimited = QtWidgets.QCheckBox("Unlimited fuel (mass constant, consumption tracked)")
         self.unlimited.setChecked(True)
-        for w in (self.gravity_overlay, self.sun_wobble, self.galactic_slow, self.unlimited):
+        for w in (self.gravity_overlay, self.sun_wobble, self.galactic_slow, self.constellations, self.unlimited):
             dl.addWidget(w)
         lay.addWidget(box)
         lay.addStretch(1)
@@ -188,6 +223,7 @@ class ControlsPanel(QtWidgets.QScrollArea):
         for c in (self.objective, self.sizing):
             c.currentIndexChanged.connect(lambda _=None: self.paramsChanged.emit())
         self.opportunity.activated.connect(lambda _=None: self.paramsChanged.emit())
+        self.launch_after.dateChanged.connect(lambda _=None: self.paramsChanged.emit())
         for c in (self.unlimited, self.use_rec):
             c.toggled.connect(lambda _=None: (self._mass_enabled(), self.paramsChanged.emit()))
         self.vmax.valueChanged.connect(lambda _=None: self._vmax_text())
@@ -207,6 +243,17 @@ class ControlsPanel(QtWidgets.QScrollArea):
                                f"Δv from the parking orbit {(v - np.sqrt(3.986004418e14 / R_PARK)) / 1e3:.2f} km/s")
         self.vmax_info.setWordWrap(True)
 
+    STATUS_STYLE = {"red": ("#3a1c1c", "#f0a0a0", "#7a3030"), "amber": ("#3a3012", "#fad27a", "#7a6520"),
+                    "green": ("#143a1e", "#9fe3b0", "#2a7a3e"), "grey": ("#22262c", "#c3c2b7", "#383835")}
+
+    def set_tractor_status(self, colour, text):
+        """The coloured strip above the tractor's launch button (red / amber / green / grey) with why it can or
+        cannot launch now."""
+        bg, fg, edge = self.STATUS_STYLE[colour]
+        self.tractor_status.setStyleSheet(f"background: {bg}; color: {fg}; border: 1px solid {edge}; border-radius: 4px;")
+        self.tractor_status.setText(text)
+        self._tractor_status = (colour, text)
+
     def set_stage(self, stage, dart_ready=True, tractor_ready=False):
         """plan: planning mode; live: a live run (DART / tractor launch buttons per the mission state)."""
         if self.on_stage is not None:  # the session log (app/session_log.py), with the caller
@@ -214,13 +261,34 @@ class ControlsPanel(QtWidgets.QScrollArea):
 
             self.on_stage(stage, dart_ready, tractor_ready, sys._getframe(1).f_code.co_name)
         live = stage == "live"
-        for w in (self.storm, self.storm_days, self.skip, self.finish, self.end_live):
+        for w in (self.storm, self.storm_days, self.skip, self.finish, self.end_live, self.release):
             w.setVisible(live)
         self.launch_dart.setEnabled(dart_ready)
         self.launch_dart.setText("🚀  Launch DART" if not live else "🚀  Launch the next DART")
         self.launch_tractor.setEnabled(tractor_ready)
+        if not live:
+            self.release.setEnabled(False)
         self.slider.setEnabled(not live)
         self.jump.setEnabled(not live)
+        self.launch_after.setEnabled(not live)  # (a live run's next DARTs launch from the mission clock)
+        self.follow_slider.setEnabled(not live)
+
+    def earliest_launch_t(self):
+        from core.timeutil import iso_to_t
+
+        return iso_to_t(self.launch_after.date().toString("yyyy-MM-dd"))
+
+    def set_earliest_launch(self, t):
+        """The earliest launch from a time (the slider's): the date edit shows it and the plan follows it."""
+        q = QtCore.QDate.fromString(t_to_utc_str(t)[:10], "yyyy-MM-dd")
+        if q != self.launch_after.date():
+            self.launch_after.setDate(q)  # (dateChanged: paramsChanged, the plan is redone)
+
+    def set_release_ready(self, on):
+        """The release button follows the mission state (set on every snapshot): the tractor holds at Bennu and
+        the tow is not over."""
+        if self.release.isEnabled() != bool(on):
+            self.release.setEnabled(bool(on))
 
     def lock_dart(self, locked):
         for w in (self.opportunity, self.use_rec, self.sizing, self.imp_mass, self.vmax, self.beta, self.beta_sigma):
@@ -263,7 +331,8 @@ class ControlsPanel(QtWidgets.QScrollArea):
             opportunity=self.opportunity.currentData() if self.opportunity.count() else -1,
             use_recommended_mass=self.use_rec.isChecked(), dart_sizing=self.sizing.currentData(),
             impactor_mass_kg=self.imp_mass.value(), dart_max_speed_kms=self.vmax.value(), beta=self.beta.value(),
-            beta_sigma=self.beta_sigma.value(), unlimited_fuel=self.unlimited.isChecked())
+            beta_sigma=self.beta_sigma.value(), unlimited_fuel=self.unlimited.isChecked(),
+            earliest_launch=self.launch_after.date().toString("yyyy-MM-dd"))
 
     def set_jumps(self, items):
         """items: [(label, t)]"""
@@ -487,7 +556,8 @@ PROX_TEXT = {"approach": "approaching Bennu", "standoff": "stand-off: waiting fo
              "survey": "surveying the capture site", "descent": "descending to the boulder",
              "capture": "capturing the boulder", "ascent": "ascending with the boulder",
              "transfer": "moving to the tractor station", "station": "on station (towing)",
-             "parked": "parked 5 km out (tow off)"}
+             "parked": "parked 5 km out (tow off)", "release": "releasing the boulder (end of the tow)",
+             "depart": "departing: climbing away from Bennu", "departed": "left Bennu (tow over)"}
 LEVEL_COLOR = {"info": "#c3c2b7", "warn": WARN, "good": GOOD, "bad": CRITICAL}
 
 

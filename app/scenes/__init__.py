@@ -4,11 +4,14 @@
     BennuScene     Bennu at true scale, m, ICRF axes, origin = Bennu's center of mass (always top right)
     CraftScene     chase camera on the DART or the gravity tractor, craft-centered metres (below Bennu)
     EarthMoonScene Earth-Moon neighbourhood, km, origin = Earth (bottom tab: the 2135 keyhole flyby)
+    EarthImpactScene  Bennu hits Earth in 2182, km, ICRF, origin = Earth (center, in the last two days before it)
+Behind every view: the real star sky (app/scenes/sky.py).
 """
 
 from app.scenes.bennu import BennuScene
 from app.scenes.craft import CraftScene
+from app.scenes.earth_impact import EarthImpactScene
 from app.scenes.earth_moon import EarthMoonScene
 from app.scenes.solar import SolarScene
 
-__all__ = ["SolarScene", "BennuScene", "CraftScene", "EarthMoonScene"]
+__all__ = ["SolarScene", "BennuScene", "CraftScene", "EarthMoonScene", "EarthImpactScene"]

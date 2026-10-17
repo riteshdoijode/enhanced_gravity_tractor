@@ -194,6 +194,15 @@ class LowThrustGuidance:
     def _adopt(self, t, sol):
         self.t0, self.t_f, self.dt, self.dv = t, float(sol["tf"][0]), float(sol["dt"][0]), sol["dv"][0].copy()
 
+    def adopt_profile(self, t0, t_f, dt, dv):
+        """Warm start from a profile computed elsewhere (the ground flight plan of core/planner.py
+        tractor_flight_plan): the next update() refines it from the actual state toward the same arrival."""
+        self.t0, self.t_f, self.dt, self.dv = float(t0), float(t_f), float(dt), np.array(dv, float).copy()
+
+    def profile(self):
+        """The current profile as a plain dict (what adopt_profile takes)."""
+        return {"t0": self.t0, "t_f": self.t_f, "dt": self.dt, "dv": None if self.dv is None else self.dv.copy()}
+
     def _resampled(self, t, N):
         """Remaining profile mapped onto N new segments over [t, t_f] (warm start)."""
         new_dt = (self.t_f - t) / N

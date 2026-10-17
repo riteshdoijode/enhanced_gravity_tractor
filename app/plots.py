@@ -16,6 +16,8 @@ INK, INK2, MUTED = "#f0efec", "#c3c2b7", "#898781"
 GRID, AXIS = "#2c2c2a", "#383835"
 S1, S2, S3, S4 = "#3987e5", "#d95926", "#199e70", "#c98500"  # blue, orange, aqua, yellow (dark steps)
 CRITICAL, GOOD, WARNING = "#d03b3b", "#0ca30c", "#fab219"  # status palette (critical / good / warning)
+BENNU_COLOR = "#ffb347"  # Bennu's orange, as in the Solar System view
+TRACTOR_COLOR = S1  # the gravity tractor's blue: its launch window and planned path, here and in the Solar System view
 # DART window markers: what the DART as set does in each window (core/planner.py: window_capability). Each class
 # has its own symbol as well as its status colour, so the legend never relies on colour alone.
 WINDOW_STATUS = [("target", GOOD, "o", "●", "reaches the target with this DART"),
@@ -132,11 +134,19 @@ class DistancePlot(pg.PlotWidget):
         lo, hi = eph.span("bennu")
         t = np.concatenate([np.linspace(lo, hi - 30 * DAY, 60_000), np.linspace(hi - 30 * DAY, hi, 4000)])
         d = np.linalg.norm(eph.rel_pos("bennu", "earth", t), axis=1) / AU
-        self.plot(*minmax_decimate(t_to_year(t), np.maximum(d, 1e-5)), pen=pg.mkPen(S1, width=1.5),
-                  name="Scenario orbit (no deflection)")
+        self.plot(*minmax_decimate(t_to_year(t), np.maximum(d, 1e-5)), pen=pg.mkPen(BENNU_COLOR, width=1.5),
+                  name="Bennu, scenario orbit (no deflection)")
         self.getPlotItem().setClipToView(True)
         self.defl = self.plot([], [], pen=pg.mkPen(GOOD, width=1.8), name="Deflected orbit (full-model physics)")
-        self.leg.setColumnCount(2)  # one row along the bottom, below the window markers
+        # the gravity tractor: its launch window (translucent blue band over the launch dates that still reach Bennu
+        # in time) and the planned flight's Earth distance, rising from Earth to meet Bennu's curve at the intercept
+        self.tr_band = pg.LinearRegionItem(values=(0, 0), movable=False, brush=pg.mkBrush(57, 135, 229, 45),
+                                           pen=pg.mkPen(TRACTOR_COLOR, width=1, style=QtCore.Qt.DotLine))
+        self.tr_band.setZValue(-10)
+        self.tr_band.setVisible(False)
+        self.addItem(self.tr_band)
+        self.tr_curve = self.plot([], [], pen=pg.mkPen(TRACTOR_COLOR, width=2.0), name=self.TRACTOR_NAME)
+        self.leg.setColumnCount(3)  # one row along the bottom, below the window markers
         self.addLine(y=np.log10(LUNAR_DISTANCE / AU), pen=pg.mkPen(MUTED, width=1))
         txt = pg.TextItem("Moon's distance (goal)", color=INK2, anchor=(0, 1))
         txt.setPos(t_to_year(lo), np.log10(LUNAR_DISTANCE / AU))
@@ -252,6 +262,37 @@ class DistancePlot(pg.PlotWidget):
             self.defl.setData([], [])
         else:
             self.defl.setData(*minmax_decimate(t_to_year(np.asarray(t)), np.maximum(np.asarray(d) / AU, 1e-5)))
+
+    TRACTOR_NAME = "Gravity tractor (plan): launch window and flight"
+
+    def set_tractor(self, window, path_t=None, path=None, eph=None, live=False):
+        """The gravity tractor's launch window (core/planner.py tractor_launch_window: the blue band over the launch
+        dates that still reach Bennu in time; its dates go in the legend entry, where they never cover a curve) and
+        its planned flight (barycentric path samples with their times: Earth distance from the launch to the
+        intercept). window None: no band (no plan yet, or the tractor has launched: its planned flight alone)."""
+        self._tractor = (window, path_t, path, live)
+        if path is not None and path_t is not None and eph is not None:
+            d = np.linalg.norm(np.asarray(path) - eph.pos("earth", np.asarray(path_t)), axis=1) / AU
+            self.tr_curve.setData(t_to_year(np.asarray(path_t)), np.maximum(d, 1e-5))
+        else:
+            self.tr_curve.setData([], [])
+        band = window is not None and bool(np.any(window["ok"]))
+        self.tr_band.setVisible(band)
+        if band:
+            t0, t1 = float(window["t"][window["ok"]].min()), float(window["t_last"])
+            self.tr_band.setRegion((t_to_year(t0), t_to_year(t1)))
+            what = "the tow closes the gap" if window.get("gap", 0.0) > 0 else "the tow holds the aim"
+            name = f"Gravity tractor: launch window {t_to_utc_str(t0)[:7]} → {t_to_utc_str(t1)[:7]} ({what}), planned flight"
+        elif window is not None:
+            name = "Gravity tractor: no launch reaches Bennu in time to close the gap"
+        elif self.tr_curve.xData is not None and len(self.tr_curve.xData):
+            name = "Gravity tractor: planned flight"
+        else:
+            name = self.TRACTOR_NAME
+        lab = self.leg.getLabel(self.tr_curve)
+        if lab is not None and lab.text != name:
+            lab.setText(name)
+            self.leg.updateSize()
 
     def set_time(self, t):
         self.cursor.setPos(t_to_year(t))
