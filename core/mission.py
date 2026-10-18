@@ -699,7 +699,9 @@ class LiveMission:
             self.tow_end = min(self.tow_start + self.p.tow_years * YEAR, self.planner.t_ca - 0.5 * YEAR)
         a_mag = G * pr.mass / pr.d_station**2
         if t1 >= self.tow_end:
-            self.end_tow(t1, f"the {self.p.tow_years:g}-year tow time is up")
+            why = (f"the {self.p.tow_years:g}-year tow time is up" if np.isfinite(self.p.tow_years)
+                   else "half a year before the 2135 flyby, the latest a tow can run")
+            self.end_tow(t1, why)
             return
         if t1 >= self.trim.next:
             was_on = self.trim.tow_on

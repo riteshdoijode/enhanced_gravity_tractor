@@ -152,7 +152,6 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.objective.addItem("Most fuel-efficient (≤ 6 yr)", "efficient")
         self.boulder = ParamSlider("Boulder collected", 0, 60, d.boulder_mass_kg / 1e3, "t", decimals=0,
                                    tooltip="Enhanced gravity tractor: mass picked up from Bennu's surface")
-        self.tow = ParamSlider("Tow duration", 0, 25, d.tow_years, "yr", decimals=1)
         self.hover = ParamSlider("Hover distance", 1.5, 4.0, d.hover_factor, "× radius", decimals=2)
         self.launch_tractor = QtWidgets.QPushButton("🚀  Launch gravity tractor")
         self.launch_tractor.setStyleSheet("font-weight: 700; padding: 6px;")
@@ -168,9 +167,9 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.release = QtWidgets.QPushButton("⤒  Release the boulder and end the tow")
         self.release.setToolTip("End of the tow: the tractor lets the boulder go where it is, climbs to 50 km and leaves\n"
                                 "Bennu; Bennu is then flown on with the full force model. Available while the tractor\n"
-                                "holds its station (towing or parked). The tow also ends by itself when its time is up\n"
-                                "or once the trim has held for 60 days.")
-        for w in (self.thrust, self.objective, self.boulder, self.tow, self.hover, self.tractor_status,
+                                "holds its station (towing or parked). The tow also ends by itself once the trim has\n"
+                                "held for 60 days, or half a year before the 2135 flyby.")
+        for w in (self.thrust, self.objective, self.boulder, self.hover, self.tractor_status,
                   self.launch_tractor, self.release):
             trl.addWidget(w)
         lay.addWidget(box)
@@ -218,7 +217,7 @@ class ControlsPanel(QtWidgets.QScrollArea):
         lay.addWidget(box)
         lay.addStretch(1)
 
-        for w in (self.goal, self.target, self.thrust, self.boulder, self.tow, self.hover, self.imp_mass, self.vmax,
+        for w in (self.goal, self.target, self.thrust, self.boulder, self.hover, self.imp_mass, self.vmax,
                   self.beta, self.beta_sigma):
             w.valueChanged.connect(lambda _=None: self.paramsChanged.emit())
         for c in (self.objective, self.sizing):
@@ -298,7 +297,7 @@ class ControlsPanel(QtWidgets.QScrollArea):
             self._mass_enabled()
 
     def lock_tractor(self, locked):
-        for w in (self.objective, self.boulder, self.tow, self.hover):
+        for w in (self.objective, self.boulder, self.hover):
             w.setEnabled(not locked)
 
     def set_opportunities(self, opps, selected_index, recommended_index):
@@ -328,7 +327,8 @@ class ControlsPanel(QtWidgets.QScrollArea):
         return MissionParams(
             goal_ld=self.goal.value(), dart_target_km=self.target.value(), tractor_thrust_n=self.thrust.value(),
             tractor_objective=self.objective.currentData(), boulder_mass_kg=self.boulder.value() * 1e3,
-            tow_years=self.tow.value(), hover_factor=self.hover.value(),
+            # no time limit: the tow ends on the release button, the 60-day trim hold, or half a year before 2135
+            tow_years=np.inf, hover_factor=self.hover.value(),
             opportunity=self.opportunity.currentData() if self.opportunity.count() else -1,
             use_recommended_mass=self.use_rec.isChecked(), dart_sizing=self.sizing.currentData(),
             impactor_mass_kg=self.imp_mass.value(), dart_max_speed_kms=self.vmax.value(), beta=self.beta.value(),
