@@ -189,7 +189,8 @@ the same window; if the window is over, a dialog lists the windows still ahead a
   towing or parked) lets the boulder go where the craft is. The boulder stays there as a marker and the
   spacecraft is 10 t again. The craft holds 30 minutes, climbs radially to 50 km (`depart`), burns 0.5 m/s and
   leaves (`departed`); Bennu is then flown on with the full force model and its prediction is requested. The tow
-  also ends by itself when `tow_years` is up, or once the trim has held (parked, tow off) for 60 days.
+  has no time limit: once the trim is reached the tractor stays parked 5 km out *with* its boulder (towing again
+  if the flyby drifts) until you press Release, and it ends by itself only half a year before the 2135 flyby.
 - **Bennu hits Earth** (centre page): when the clock is in the last two days before an Earth impact, or the 20
   minutes after it, the centre shows it (app/scenes/earth_impact.py). In planning mode that is the scenario
   without a deflection (Jump to… "Earth impact 2182"); in a live run, the run's verified orbit if it still hits.
@@ -591,7 +592,8 @@ Step 6 validation (tests/test_step6_impact.py, figure `impact`):
   - The craft sits on its hold point (Step 5 showed the closed loop holds it to centimetres), with the
     hover thrust and propellant integrated daily.
   - At slower warps the full closed loop (LQR/MPC + EKF) runs.
-  - The tow lasts `tow_years`, ending at most 0.5 yr before the encounter.
+  - The tow lasts until the release command (the app has no tow duration; `tow_years` remains for scripted
+    runs), ending at most 0.5 yr before the encounter.
 - **Final verification**: when the tow ends, Bennu is propagated twice with the full nonlinear force
   model (once with the recorded impact and tow, once without) to the 2060 encounter, on a background
   thread.
@@ -909,8 +911,8 @@ order, and the Step 6 test uses that to launch the tractor first.
   2. parked 5 km out, the tractor still pulls about 1 %, enough to re-arm the tow every ~50 days. It now
      resumes only when the error is worth 3 days of towing.
 
-  The tow also ends now: the boulder is released after 60 days of holding the trim, when `tow_years` is up,
-  or on command (tests/test_trim_hold.py, tests/test_release.py).
+  The tow also ends now, on command (tests/test_release.py). (A 60-day automatic release after the trim was
+  removed on 2026-10-18, see below.)
 - **A different launch date gave the same run.** "Launch DART" flew the window's best arc planned from today
   whatever the time slider said. The new "Launch no earlier than" date (bound to the slider) restricts the
   porkchop to later launches. The porkchop's launch grid is now anchored at the window's start, so a date that

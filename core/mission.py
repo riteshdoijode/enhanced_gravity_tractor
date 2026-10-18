@@ -69,7 +69,6 @@ SLOWMO_EARTH_ALT = _EARTH_ALT  # Bennu within 1,000 km of Earth's surface on an 
 SLOWMO_EARTH = _SLOWMO_EARTH[0]
 SLOWMO_CAPTURE = 15.0  # s/s while the arm grabs and stows the boulder (~11 min of mission time)
 SLOWMO_ASCENT = (900.0, 60.0)  # the first 15 minutes of the ascent with the boulder
-TRIM_HOLD_DAYS = 60.0  # the trim has held (tow off, parked) this long: the boulder is released, the tractor leaves
 
 
 @dataclass
@@ -166,7 +165,6 @@ class LiveMission:
         self.trim = None  # B-plane trim guidance, created when the tractor first reaches its station
         self.tow_start = self.tow_end = np.nan
         self.tow_complete = False
-        self.trim_off_since = np.nan  # when the trim switched the tow off (the hold that ends in the release)
         self.final_check = None  # full-model prediction for the pushes so far (dict)
         self._check_key = None  # the pushes it covers
         self._wait = None  # (why, kind, t) the clock waits for: Bennu's orbit to t, or the 2135 prediction
@@ -708,19 +706,15 @@ class LiveMission:
             on, e = self.trim.update(self.defl, t1, a_mag, self.tow_end)
             if was_on != on or on:  # the station moves only while towing (parked: stays parked, see core/tow.py)
                 pr.retarget(pr.e_station if e is None else e, tow_on=on)
-            if was_on != on:
-                self.trim_off_since = t1 if not on else np.nan
-                self.log(t1, "tractor", "Trim reached: parking 5 km out (tow off)" if not on else
-                         "Trim error grew: back on station (tow on)", "good" if not on else "warn")
-        if (not self.trim.tow_on and np.isfinite(self.trim_off_since)
-                and t1 - self.trim_off_since >= TRIM_HOLD_DAYS * DAY):
-            self.end_tow(t1, f"the trim has held for {TRIM_HOLD_DAYS:.0f} days")
+            if was_on != on:  # parked, the tractor keeps its boulder: only ⤒ Release (or the latest tow end) ends it
+                self.log(t1, "tractor", "Trim reached: parking 5 km out (tow off; ⤒ Release ends the tow)" if not on
+                         else "Trim error grew: back on station (tow on)", "good" if not on else "warn")
 
     def end_tow(self, t=None, why="released on command"):
         """End of the tow: the boulder is released and the tractor leaves Bennu (proximity phases release ->
         depart -> departed, core/proximity/ops.py); Bennu is flown on with the full force model and its prediction
-        is requested. Called when the tow time is up, when the trim has held TRIM_HOLD_DAYS, and by the runner's
-        'release' command. False if there is no tractor on station / parked to release."""
+        is requested. Called when the tow time is up (at the latest half a year before the 2135 flyby) and by the
+        runner's 'release' command. False if there is no tractor on station / parked to release."""
         t = self.t if t is None else float(t)
         pr = self.tractor.prox
         if pr is None or self.tow_complete or pr.phase not in ("station", "parked", "transfer"):

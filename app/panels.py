@@ -167,8 +167,8 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.release = QtWidgets.QPushButton("⤒  Release the boulder and end the tow")
         self.release.setToolTip("End of the tow: the tractor lets the boulder go where it is, climbs to 50 km and leaves\n"
                                 "Bennu; Bennu is then flown on with the full force model. Available while the tractor\n"
-                                "holds its station (towing or parked). The tow also ends by itself once the trim has\n"
-                                "held for 60 days, or half a year before the 2135 flyby.")
+                                "holds its station (towing or parked). Parked, the tractor keeps its boulder until you\n"
+                                "press this; the tow ends by itself only half a year before the 2135 flyby.")
         for w in (self.thrust, self.objective, self.boulder, self.hover, self.tractor_status,
                   self.launch_tractor, self.release):
             trl.addWidget(w)
@@ -327,7 +327,7 @@ class ControlsPanel(QtWidgets.QScrollArea):
         return MissionParams(
             goal_ld=self.goal.value(), dart_target_km=self.target.value(), tractor_thrust_n=self.thrust.value(),
             tractor_objective=self.objective.currentData(), boulder_mass_kg=self.boulder.value() * 1e3,
-            # no time limit: the tow ends on the release button, the 60-day trim hold, or half a year before 2135
+            # no time limit: the tow ends on the release button, or at the latest half a year before 2135
             tow_years=np.inf, hover_factor=self.hover.value(),
             opportunity=self.opportunity.currentData() if self.opportunity.count() else -1,
             use_recommended_mass=self.use_rec.isChecked(), dart_sizing=self.sizing.currentData(),

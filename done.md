@@ -435,7 +435,8 @@ Before any edit the project was put under git: commit "Checkpoint before fixes (
   Parked now stays parked.
 - **No way to end the tow.** New **⤒ Release the boulder and end the tow** button. The boulder is left where
   the craft is; the craft holds 30 min, climbs to 50 km, burns 0.5 m/s and leaves. Bennu is then flown on with
-  the full force model. The tow also ends by itself after `tow_years`, or once the trim has held for 60 days.
+  the full force model. The tow has no time limit: parked after the trim, the tractor keeps its boulder until the
+  button is pressed; it ends by itself only half a year before the 2135 flyby.
 - **A different launch date gave the same run.** New **Launch no earlier than** date in the DART section,
   bound to the time slider (dragging the slider sets it; Play and Jump do not). The plan, the markers and
   Launch DART follow it. A date before a window's best arc leaves the plan exactly as it was: the porkchop's
@@ -481,7 +482,7 @@ Before any edit the project was put under git: commit "Checkpoint before fixes (
   - `--smoke` (planning);
   - `--smoke-live`;
   - `--smoke-prox`: DART #1 fell short, DART #2 succeeded, the tractor was ready the second the verdict came,
-    then capture, trim, parked, released after 60 days, departed, 2135 flyby at 1.36 LD, "Earth is safe";
+    then capture, trim, parked, ⤒ Release pressed, departed, 2135 flyby at 1.36 LD, "Earth is safe";
   - `--smoke-impact` (the impact page in planning playback).
 - New tests: test_display_interp, test_trim_hold, test_release, test_tractor_window, test_earliest_launch,
   test_sky, test_earth_impact.

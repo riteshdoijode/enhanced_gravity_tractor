@@ -1,8 +1,10 @@
 """Parked stays parked. Once the trim law has placed the 2135 flyby at the aim point (or holds an overshoot) the
 B-plane error is numerical noise of a few metres; before the fix its steepest-descent direction g / |g| flipped sign
 from week to week and the parked tractor was sent on a 175-degree transfer around Bennu every week (session log of
-2026-10-17). Now the direction is kept while the tow is off, the parked tractor keeps its hold point, and after
-TRIM_HOLD_DAYS of holding the boulder is released and the tractor leaves."""
+2026-10-17). Now the direction is kept while the tow is off and the parked tractor keeps its hold point and its
+boulder: the tow ends only on the release command (or half a year before the 2135 flyby). Before 2026-10-18 the
+mission released the boulder by itself after 60 days of holding, which at 1 month/s took two seconds and looked
+like the boulder vanishing."""
 
 import numpy as np
 import pytest
@@ -56,10 +58,23 @@ def test_parked_direction_does_not_flip(setup):
     # is decided by tow_on, not by the error floor)
 
 
-def test_parked_tractor_keeps_its_hold_point_then_releases(setup):
-    """Mission level: a tractor parked by the trim law keeps its 5 km hold point over 20 weekly updates (no new
-    transfers), and after TRIM_HOLD_DAYS the mission releases the boulder and the tractor departs."""
-    from core.mission import TRIM_HOLD_DAYS, LiveMission
+def test_nothing_to_tow_keeps_the_station_direction(setup):
+    """An overshoot held from the start (aim = where the flyby already is): the error is rounding noise, so the law
+    gives no direction (before the fix its noise direction sent the tractor 180 degrees around Bennu to park)."""
+    _, nom, pl = setup
+    t_imp = iso_to_t("2030-06-22")
+    d = Deflection(nom, t_imp - DAY)
+    d.impulse(t_imp, np.array([1.5e-6, -2.5e-6, 1e-6]))
+    t = t_imp + 30 * DAY
+    trim = TrimGuidance(pl, "aim", aim_shift=TrimGuidance(pl, "aim").b_now(d, t) + 1e-9)
+    on, e = trim.update(d, t, G * 30_000 / 485.0**2, t + 10 * YEAR)
+    assert not on and e is None
+
+
+def test_parked_tractor_keeps_its_hold_point_and_boulder(setup):
+    """Mission level: a tractor parked by the trim law keeps its 5 km hold point and its boulder over 20 weekly
+    updates (well past the old 60-day automatic release); the release command then leaves the boulder there."""
+    from core.mission import LiveMission
     from core.planner import MissionParams
     from core.proximity.ops import D_PARK, ProximityOps
 
@@ -84,19 +99,22 @@ def test_parked_tractor_keeps_its_hold_point_then_releases(setup):
     pr._tow_averaged = True
     m.trim = TrimGuidance(pl, "aim", aim_shift=np.zeros(2))
     m.tow_start, m.tow_end = t0, t0 + 10 * YEAR
+    e_station = pr.e_station.copy()
     while pr.phase != "parked" and m.t < t0 + 30 * DAY:
         m.advance(m.t + DAY)
     assert pr.phase == "parked"
+    assert np.allclose(pr.e_station, e_station), "nothing to tow: the tractor parks straight out from its station"
     e_park = pr.e_station.copy()
     n_transfers = sum("Transfer" in e.text for e in m.events)
-    t_off = next(e.t for e in m.events if e.text.startswith("Trim reached"))  # the hold counts from here
     t_parked = m.t
-    while m.t < t_parked + 20 * 7 * DAY and not m.tow_complete:
+    while m.t < t_parked + 20 * 7 * DAY:
         m.advance(m.t + DAY)
     assert sum("Transfer" in e.text for e in m.events) == n_transfers, "a parked tractor must not be re-parked"
     assert np.allclose(pr.e_station, e_park)
-    assert m.tow_complete and m.tow_end == pytest.approx(t_off + TRIM_HOLD_DAYS * DAY, abs=1.5 * DAY)
-    assert any("Tow complete (the trim has held" in e.text for e in m.events)
-    assert not pr.has_boulder and pr.boulder_free is not None
+    assert not m.tow_complete and pr.phase == "parked" and pr.has_boulder, "parked: the boulder stays aboard"
+    assert not any("Tow complete" in e.text for e in m.events)
+    assert np.linalg.norm(pr.x[:3]) == pytest.approx(D_PARK, rel=0.01)
+    assert m.end_tow()  # what the ⤒ Release button does
+    assert m.tow_complete and not pr.has_boulder and pr.boulder_free is not None
     assert np.linalg.norm(pr.boulder_free[1]) == pytest.approx(D_PARK, rel=0.05)  # left at the parking point
     m.close()

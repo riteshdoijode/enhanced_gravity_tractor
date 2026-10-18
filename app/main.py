@@ -1320,7 +1320,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bennu.live = s
                 self.bennu._update_live()
                 self.bennu.reset_camera()
-            elif phase in ("survey", "transfer", "station", "release", "depart"):
+            elif phase in ("survey", "transfer", "station", "parked", "release", "depart"):
                 self.bennu.reset_camera()
             elif phase == "departed":  # the tractor has left: back to Bennu itself
                 self.bennu._sc_pos = None
@@ -1536,7 +1536,10 @@ def _smoke_live(win, app, mode):
             if tag not in st["shots"]:
                 st["shots"].add(tag)
                 _shot(win, f"app_prox_{pr['phase']}")
-            if pr["phase"] == "station" and i % 10 == 0:
+            if pr["phase"] in ("station", "parked") and i % 10 == 0 and not st.get("released"):
+                st["released"] = press(win.controls.release)  # the tow ends as a user ends it: ⤒ Release
+            if st.get("released") and not st.get("finished") and pr["phase"] in ("release", "depart", "departed"):
+                st["finished"] = True
                 win.sim.send("finish")
         if done or i > 2400:
             _shot(win, f"app_{mode}_end")

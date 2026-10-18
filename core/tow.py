@@ -13,8 +13,8 @@ shifts relative to the scenario point b0:
   * "aim" (default: place the flyby at the DART aim point b_aim): tow along the steepest descent of the
     error, e = B(t)^T (b_aim - b) / |...|, for the time that minimizes the error along e,
     tau = (err . B e) / (a |B e|^2), then stop: the tractor parks 5 km out where its pull is ~1 %. Parked, it
-    keeps its direction and resumes only if the error grows to TOW_RESUME_DAYS of towing (hysteresis); after
-    TRIM_HOLD_DAYS of holding the mission releases the boulder and the tractor leaves (core/mission.py).
+    keeps its direction and its boulder, and resumes only if the error grows to TOW_RESUME_DAYS of towing
+    (hysteresis). The tow ends on the release command, at the latest half a year before the flyby (core/mission.py).
   * "maximize": push along the current miss direction w = b / |b|, e(t) = B(t)^T w / |B(t)^T w|.
 
 Nonlinear verification. The scenario orbit is linear in a tiny offset before t_pre (60 days before the 2135
@@ -182,8 +182,9 @@ class TrimGuidance:
             # The direction only changes while the tow is on and the error is real. Once the aim is reached (or an
             # overshoot is held) err is numerical noise of a few metres, and g / |g| flips sign from week to week:
             # steering the parked tractor by it sent it on long transfers around Bennu. (e stays None when there is
-            # nothing to tow at all: the caller keeps the station where it is.)
-            if e_new is not None and (self.e is None or (self.tow_on and np.linalg.norm(err) > self.ERR_FLOOR)):
+            # nothing to tow at all, e.g. a DART overshoot held from the start: the caller keeps the station's
+            # direction, so the tractor parks straight out instead of 180 degrees around Bennu.)
+            if e_new is not None and self.tow_on and np.linalg.norm(err) > self.ERR_FLOOR:
                 self.e = e_new
             # deadbeat: tow exactly the time needed (re-checked at least weekly), then re-evaluate
             self.next = t + (min(self.period, max(tau, 0.25 * DAY)) if self.tow_on else self.period)
