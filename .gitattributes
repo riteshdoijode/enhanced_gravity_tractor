@@ -1,0 +1,15 @@
+# Same line endings on every OS (a Windows checkout must not turn the Python files into CRLF).
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+uv.lock text eol=lf
+# Binary data: never touch.
+*.npz binary
+*.npy binary
+*.glb binary
+*.vtp binary
+*.jpg binary
+*.png binary
+*.h5 binary

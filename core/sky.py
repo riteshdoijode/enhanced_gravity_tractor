@@ -26,6 +26,47 @@ from core.constants import ASSET_DIR
 SKY_URL = "https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data/"
 SKY_FILES = ("stars.8.json", "constellations.lines.json", "constellations.json")
 SKY_NPZ = ASSET_DIR / "sky.npz"
+# The Milky Way background (the default sky): NASA/Goddard Space Flight Center Scientific Visualization Studio,
+# "Deep Star Maps 2020" (SVS 4851; Gaia DR2: ESA/Gaia/DPAC; Hipparcos-2, Tycho-2): the whole sky in plate carree,
+# ICRF right ascension / declination, centred on 0h with right ascension increasing to the left, north up; linear
+# light. Converted once (fetch_data --only sky) to an sRGB JPEG.
+MILKYWAY_URL = "https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/starmap_2020_8k.exr"
+MILKYWAY_RAW = "starmap_2020_8k.exr"
+MILKYWAY_JPG = ASSET_DIR / "milkyway_8k.jpg"
+MILKYWAY_GAIN = 3.0  # exposure for the screen: the Milky Way glow is 1-4 % of the brightest stars (clear, not washed out)
+
+
+def process_milkyway(exr_path, out=MILKYWAY_JPG, gain=MILKYWAY_GAIN):
+    """SVS star map (linear EXR) -> sRGB JPEG (8192 x 4096). Returns the image size."""
+    import OpenEXR
+    from PIL import Image
+
+    px = OpenEXR.File(str(exr_path)).channels()["RGB"].pixels.astype(np.float32)
+    x = np.clip(px * gain, 0.0, 1.0)
+    srgb = np.where(x <= 0.0031308, 12.92 * x, 1.055 * x ** (1 / 2.4) - 0.055)
+    Image.fromarray((srgb * 255 + 0.5).astype(np.uint8)).save(out, quality=92, optimize=True)
+    return px.shape[1], px.shape[0]
+
+
+@lru_cache(maxsize=2)
+def load_milkyway(half=False):
+    """The Milky Way background as uint8 (rows from the top = north), full or half resolution; None if missing."""
+    if not MILKYWAY_JPG.exists():
+        return None
+    from PIL import Image
+
+    img = Image.open(MILKYWAY_JPG).convert("RGB")
+    if half:
+        img = img.resize((img.width // 2, img.height // 2), Image.Resampling.BOX)
+    return np.asarray(img)
+
+
+def milkyway_pixel(ra_deg, dec_deg, shape):
+    """(row from the top, column) of a sky direction in the Milky Way image (0h at the centre, RA to the left)."""
+    h, w = shape[:2]
+    col = int(((0.5 - np.asarray(ra_deg) / 360.0) % 1.0) * w) % w
+    row = int(np.clip((90.0 - np.asarray(dec_deg)) / 180.0 * h, 0, h - 1))
+    return row, col
 BV_MISSING = 0.65  # stars without a B-V (52 of 41,411): a Sun-like colour
 
 

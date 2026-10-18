@@ -2,7 +2,8 @@
 
 Interactive planetary-defense simulator for asteroid **101955 Bennu**: a DART-style kinetic impactor
 (primary deflection) plus an Enhanced Gravity Tractor (precision trim), both starting from Earth orbit.
-Autonomous Space Robotics, Fall 2026. Runs entirely on macOS (Apple Silicon).
+Autonomous Space Robotics, Fall 2026. Developed and tested on macOS (Apple Silicon). Windows and Linux are untested; see
+[Running on Windows or Linux](#running-on-windows-or-linux). Papers and data sources: [references.md](references.md).
 
 **Mission goal (keyhole scenario):** Bennu's 2135 flyby, between the Earth and the Moon, is assumed to pass
 through the gravitational keyhole that brings it back to hit Earth on 2182-09-24. The DART (one or more, one at
@@ -13,7 +14,7 @@ a time) and then the gravity tractor must push that flyby out to at least the Mo
 
 ```bash
 uv sync                                   # Python 3.12 + dependencies
-uv run python -m scripts.fetch_data       # JPL ephemerides, SBDB, NASA 3D models, star sky (~150 MB, ~3 min)
+uv run python -m scripts.fetch_data       # JPL ephemerides, SBDB, NASA 3D models, star sky, Milky Way (~285 MB, ~4 min)
 uv run python -m scripts.fit_bennu        # estimate Bennu's Yarkovsky/SRP parameters vs JPL (~45 s)
 uv run python -m scripts.precompute       # Bennu nominal orbit + state-transition matrix 2026-2185 (~100 s)
 uv run python -m scripts.make_scenario    # keyhole scenario: 2135 keyhole -> 2182 impact (~2 min; --rescan ~12 min)
@@ -30,10 +31,28 @@ uv run python -m scripts.fetch_data --only ephem|sbdb|assets|sky
 uv run python -m app.impact_show          # Bennu hits Earth in 2182 (no deflection), on its own
 ```
 
+### Running on Windows or Linux
+
+The project was only ever run on a Mac, so nothing below has been tested elsewhere. The code is written to degrade
+gracefully: the macOS-only calls (thread quality-of-service classes, `sysctl` for core counts in `core/parallel.py`)
+fail quietly and fall back to `os.cpu_count()`, and worker processes always use the `spawn` start method, which is
+what Windows uses. Install [uv](https://docs.astral.sh/uv/) and run the same commands from PowerShell or a terminal.
+
+- `data/` is not in the repository (about 190 MB, regenerated). The four setup commands above recreate it, in order:
+  `fetch_data` (needs internet; JPL Horizons and NASA servers), `fit_bennu`, `precompute`, `make_scenario`.
+  Run them before `app.main`.
+- To only read the code, none of that is needed: start with `core/` (physics), `scripts/validate.py` (figures) and
+  `tests/` (what each piece is checked against).
+- `--cores N` limits the CPU use; the default is every core.
+- If the 3D window does not open, the usual causes are the graphics driver (PyVista/VTK needs OpenGL) or a missing
+  wheel for Python 3.12; the project pins Python 3.12 (`requires-python`).
+
 ## Using the app
 
-**Layout.** Controls on the left. The **Solar System** stays in the center (🏠 shows it from the side as it moves
-around the Milky Way, with the paths the planets trace; see [below](#the-sun-around-the-solar-system-barycenter-coredynamicssolar_systempy)).
+**Layout.** Controls on the left. The **Solar System** stays in the center: the Sun, the eight planets and Pluto
+at their JPL positions (Neptune's and Pluto's orbits, longer than the 2026–2185 ephemerides, are closed with a
+two-body arc). **🪐** zooms out to the whole system, out to Pluto's orbit, and back. **🏠** shows it from the side
+as it moves around the Milky Way, with the paths the planets trace; see [below](#the-sun-around-the-solar-system-barycenter-coredynamicssolar_systempy).
 On the right: **Bennu** at true
 scale (always), the **spacecraft** view below it (Auto follows the DART until its impact, then the tractor;
 DART / Tractor pin one; ⟲ resets the chase camera), and the info tabs (Mission plan, Live flight, Bennu now).
@@ -41,11 +60,18 @@ Bottom tabs: Earth–Bennu distance with the DART opportunities, the 2135 B-plan
 keyhole flyby, the DART porkchop, live plots, near-Bennu plots, tractor arrival vs thrust, the Sun.
 Mouse in any 3D view: left-drag rotate, right-drag/scroll zoom, middle-drag pan.
 
-**The sky behind every view is the real one** (core/sky.py, app/scenes/sky.py): the 41,000 stars down to
-magnitude 8 at their J2000 positions, sized by magnitude and coloured by their B−V index. The Milky Way shows as
-the crowding of the faint stars along the Galactic plane. **Constellations** (Display) draws the 88 IAU figures and
-names in every view; the 🏠 side view of the Solar System always shows them. The stars are infinitely far: turning
-a camera turns the sky, panning or zooming does not move it.
+**The background of every view, the Solar System included, is the real sky** (core/sky.py, app/scenes/sky.py),
+in one of two looks:
+- **The Milky Way** (default): NASA SVS's *Deep Star Maps 2020*, built from Gaia DR2, Hipparcos-2 and Tycho-2
+  (1.7 billion stars). The 8192 × 4096 map is used in the main views and a 4096 × 2048 copy in the small ones.
+  It is converted once from linear light to sRGB with an exposure of 3, so the band and its dust lanes show
+  without saturating the core.
+- **Constellations** (the Display toggle "Constellation background"): the 41,000 catalogue stars down to
+  magnitude 8, sized by magnitude and coloured by their B−V index, with the 88 IAU figures and names.
+
+Switching cross-fades over 3 s: the Milky Way fades out as the stars, figures and names fade in, in every view
+at once. Both are at their J2000 (ICRF) positions and rotated into each view's axes. The sky is infinitely far:
+turning a camera turns it, panning or zooming does not move it.
 
 **Session log.** Every session writes `outs/logs/session_YYYYmmdd_HHMMSS.jsonl` (the "log" label in the status
 bar shows the path), one JSON object per line:
@@ -184,6 +210,7 @@ the same window; if the window is over, a dialog lists the windows still ahead a
 | OSIRIS-REx spacecraft model | NASA Science 3D Resources (glTF) |
 | Earth, Moon, Sun textures | PyVista example datasets |
 | Star sky: 41,411 stars to magnitude 8 (J2000, V, B−V) and the 88 constellation figures | d3-celestial (Olaf Frohn, BSD-3): stars from XHIP, Anderson & Francis 2012 (VizieR V/137D); figures from the IAU constellation pages |
+| Milky Way background (8192 × 4096, ICRF plate carrée) | NASA/Goddard Space Flight Center Scientific Visualization Studio, Deep Star Maps 2020 (SVS 4851); Gaia DR2: ESA/Gaia/DPAC |
 
 ## Step 1 validation (tests/test_step1_data.py)
 
@@ -623,9 +650,9 @@ The planets pull on the Sun as it pulls on them, so the Sun orbits the common ce
   - At the true speed the paths are long, stretched helices: in one year Earth circles at 1 AU while the Sun moves
     52 AU, so on screen they look almost straight. **"🏠 side view: slow the Galactic motion ×1/50"** (Display,
     display only, stated in the caption) makes the turns visible, as in the popular "helix" pictures.
-  - The background is the real sky (core/sky.py), rotated into the view's ecliptic axes, so the Milky Way (the
-    crowding of the faint stars) lies along the Galactic plane, and the side view looks toward Sagittarius with
-    Cygnus to the left. The constellations are drawn in this view.
+  - The background is the real sky (core/sky.py), rotated into the view's ecliptic axes, so the Milky Way lies
+    along the Galactic plane, and the side view looks toward Sagittarius with Cygnus to the left. The
+    constellation background (Display toggle) names them.
 
 Step 7 validation (tests/test_step7_tow.py, figures `tow`, `sun_barycenter`):
 

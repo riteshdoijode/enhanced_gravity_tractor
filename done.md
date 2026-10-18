@@ -473,6 +473,15 @@ Before any edit the project was put under git: commit "Checkpoint before fixes (
   (d3-celestial, BSD-3: XHIP stars, IAU constellation figures). The Milky Way now lies along the Galactic plane,
   which answers the note above about the decorative background. **Constellations** (Display) draws the 88
   figures and names; the 🏠 side view always shows them.
+- **Milky Way background (your follow-up).** Every view, the main one included, now defaults to NASA SVS's
+  Deep Star Maps 2020 Milky Way (Gaia DR2, Hipparcos, Tycho-2; 8k in the main views, 4k in the small ones). The
+  Display toggle "Constellation background" cross-fades over 3 s to the catalogue stars with the 88 figures and
+  names, and back. The map's orientation was checked: the Galactic centre and Cygnus are bright, the Galactic
+  poles dark. The 🏠 view no longer forces the constellations on; the toggle decides everywhere.
+- **All the planets (your follow-up).** The Solar System view now also shows Saturn, Uranus, Neptune and Pluto
+  at their JPL positions, with their orbits. Neptune's 165-year and Pluto's 248-year orbits are longer than the
+  2026–2185 ephemerides, so the rest of each is closed with a two-body arc. The new 🪐 button zooms out to the
+  whole system and back.
 - **Bennu hits Earth in 2182.** A centre page, shown in the last two days before the impact and the 20 minutes
   after (in planning mode, or a live run whose orbit still hits); `uv run python -m app.impact_show` plays it on
   its own.

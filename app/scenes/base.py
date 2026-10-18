@@ -84,12 +84,13 @@ def geom_mesh(gtype, size, mesh=None):
 
 class SceneBase:
     SKY_FRAME = None  # rotation ICRF -> scene axes of the star sky (None: the scene is in ICRF axes)
+    SKY_FULL = False  # the full 8k Milky Way (the main views) rather than the 4k one
 
     def __init__(self, plotter):
         from app.scenes.sky import SkyLayer
 
         self.pl = plotter
-        self.sky = SkyLayer(plotter, self.SKY_FRAME)  # the real sky behind the scene (app/scenes/sky.py)
+        self.sky = SkyLayer(plotter, self.SKY_FRAME, half=not self.SKY_FULL)  # the sky behind it (app/scenes/sky.py)
         self.t = None
         self.live = None
         self._a = {}  # actors

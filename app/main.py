@@ -37,6 +37,7 @@ from app.livesim import make_sim
 from app.panels import SPEEDS, START_DATE, ControlsPanel, LivePanel, MissionPanel, TelemetryPanel
 from app.plots import BPlanePlot, DistancePlot, EtaPlot, LivePlots, PorkchopPlot, ProxPlots, SunPlot
 from app.scenes import BennuScene, CraftScene, EarthImpactScene, EarthMoonScene, SolarScene
+from app.scenes.sky import SKY_FADE_S
 from app.scenes.solar import GALACTIC_SLOW
 from app.session_log import SessionLog
 from app.workers import Debounced
@@ -181,7 +182,13 @@ class MainWindow(QtWidgets.QMainWindow):
         home.setToolTip("Side view of the Solar System moving around the Milky Way (north Galactic pole up, the\n"
                         "Galactic center behind), with the paths the Sun and planets trace. Click again to leave it.")
         home.toggled.connect(self._solar_home)
-        self.center.addWidget(_titled(self.p_solar.interactor, "Solar System", [home]))
+        self.wide = wide = QtWidgets.QPushButton("🪐")
+        wide.setCheckable(True)
+        wide.setFixedSize(30, 22)
+        wide.setToolTip("Zoom out to the whole Solar System: Jupiter, Saturn, Uranus, Neptune and Pluto's orbits\n"
+                        "(out to ~49 AU). Click again for the inner planets.")
+        wide.toggled.connect(self._solar_wide)
+        self.center.addWidget(_titled(self.p_solar.interactor, "Solar System", [wide, home]))
         self.center.addWidget(self.recalc)
         # page 2: Bennu hits Earth (the last two days and 20 minutes after; app/scenes/earth_impact.py)
         self.p_impact = _interactor(self)
@@ -285,6 +292,10 @@ class MainWindow(QtWidgets.QMainWindow):
                                                     _draw(self.p_solar)))
         c.slider.valueChanged.connect(lambda d: self.set_time(lo + d * DAY))
         c.constellations.toggled.connect(self._apply_constellations)
+        self._sky_timer = QtCore.QTimer(self)  # the background cross-fade (Milky Way <-> constellations)
+        self._sky_timer.setInterval(33)
+        self._sky_timer.timeout.connect(self._sky_tick)
+        self._sky_fade = (0.0, 0.0, 0.0)
         # the earliest DART launch and the time slider, two-way: the slider dragged by hand (actionTriggered: user
         # actions only, not Play or Jump to…) sets the date 400 ms after the last move; a new date moves the clock
         self._slider_date = QtCore.QTimer(self)
@@ -702,6 +713,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if on:
             from core.galaxy import solar_motion
 
+            if self.wide.isChecked():  # (the side view takes the camera: 🪐 is released)
+                self.wide.blockSignals(True)
+                self.wide.setChecked(False)
+                self.wide.blockSignals(False)
             m = solar_motion()
             self.solar.set_galactic(m)
             self.status.showMessage(f"Solar System side view: it moves left around the Milky Way at {m['speed_kms']:.0f} "
@@ -711,16 +726,34 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.solar.set_galactic(None)
             self.solar.reset_camera()
-        self._apply_constellations()  # (the home view shows them: the side view's sky, named)
+        _draw(self.p_solar)
+
+    def _solar_wide(self, on):
+        """🪐: the whole Solar System out to Pluto's orbit, or back to the inner planets."""
+        if on and self.home.isChecked():
+            self.home.setChecked(False)  # (leaves the Galactic side view first)
+        self.solar.reset_camera(wide=on)
+        _draw(self.p_solar)
 
     def _apply_constellations(self, _on=None):
-        """The constellation figures and names: in every view with the Display checkbox, in the Solar System's
-        home view always."""
-        on = self.controls.constellations.isChecked()
+        """The background of every view, the main ones included: the Milky Way, or the constellations with the
+        Display toggle. The switch cross-fades over SKY_FADE_S (the image fades out as the figures fade in)."""
+        now = QtCore.QTime.currentTime().msecsSinceStartOfDay() / 1e3
+        self._sky_fade = (self.solar.sky.mix or 0.0, 1.0 if self.controls.constellations.isChecked() else 0.0, now)
+        self.log.write("action", what="background", to="constellations" if self._sky_fade[1] else "Milky Way")
+        self._sky_timer.start()
+
+    def _sky_tick(self):
+        c0, c1, t0 = self._sky_fade
+        now = QtCore.QTime.currentTime().msecsSinceStartOfDay() / 1e3
+        f = min(1.0, max(0.0, (now - t0) / SKY_FADE_S))
+        c = c0 + (c1 - c0) * f * f * (3 - 2 * f)
         for scene, p in ((self.solar, self.p_solar), (self.bennu, self.p_bennu), (self.craft, self.p_craft),
-                         (self.earth_moon, self.p_em)):
-            scene.sky.set_constellations(on or (scene is self.solar and self.home.isChecked()))
+                         (self.earth_moon, self.p_em), (self.earth_impact, self.p_impact)):
+            scene.sky.set_mix(c)
             _draw(p)
+        if f >= 1.0:
+            self._sky_timer.stop()
 
     def _render_all(self, side=True):
         _draw(self.p_solar)

@@ -206,10 +206,11 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.galactic_slow = QtWidgets.QCheckBox("🏠 side view: slow the Galactic motion ×1/50 (shows the helices)")
         self.galactic_slow.setToolTip("Display only. The Solar System moves 52 AU per year around the Milky Way, so the\n"
                                       "planets' true paths are long, stretched helices; slowed 50 times, the turns show.")
-        self.constellations = QtWidgets.QCheckBox("Constellations (figures and names) in every view")
-        self.constellations.setToolTip("The sky behind the views is the real one (stars to magnitude 8, at their J2000\n"
-                                       "positions and colours); this draws the 88 IAU constellations on it. The 🏠 side\n"
-                                       "view of the Solar System always shows them.")
+        self.constellations = QtWidgets.QCheckBox("Constellation background (off: the Milky Way)")
+        self.constellations.setToolTip("The background of every view, the Solar System included. Off (default): the Milky\n"
+                                       "Way, NASA SVS Deep Star Maps 2020 (Gaia DR2, Hipparcos, Tycho-2). On: the catalogue\n"
+                                       "stars to magnitude 8 with the 88 IAU constellation figures and names. Switching\n"
+                                       "cross-fades over 3 s. Both are the real sky at its J2000 positions.")
         self.unlimited = QtWidgets.QCheckBox("Unlimited fuel (mass constant, consumption tracked)")
         self.unlimited.setChecked(True)
         for w in (self.gravity_overlay, self.sun_wobble, self.galactic_slow, self.constellations, self.unlimited):

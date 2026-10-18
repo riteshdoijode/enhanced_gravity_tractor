@@ -53,3 +53,23 @@ def test_star_colours():
     assert sun.min() > 0.85
     assert hot[2] == pytest.approx(1.0) and hot[0] < 0.8
     assert cool[0] == pytest.approx(1.0) and cool[2] < 0.65
+
+
+def test_milkyway_background_orientation():
+    """The Milky Way image (NASA SVS Deep Star Maps 2020, 0h in the middle, RA to the left): the Galactic centre and
+    Cygnus are bright, both Galactic poles dark, and the RA-mirrored Galactic centre is dark (orientation check)."""
+    from core.sky import load_milkyway, milkyway_pixel
+
+    img = load_milkyway(half=True)
+    if img is None:
+        pytest.skip("assets/milkyway_8k.jpg missing: uv run python -m scripts.fetch_data --only sky")
+
+    def glow(ra, dec, r=4):
+        i, j = milkyway_pixel(ra, dec, img.shape)
+        return float(img[max(0, i - r):i + r + 1, max(0, j - r):j + r + 1].mean())
+
+    assert img.shape == (2048, 4096, 3)
+    centre, cygnus = glow(266.4, -28.9), glow(305.0, 40.0)
+    poles = max(glow(192.9, 27.1), glow(12.9, -27.1))
+    assert centre > 4 * poles and cygnus > 3 * poles
+    assert glow(93.6, -28.9) < 0.5 * centre  # the mirror image would put the core here

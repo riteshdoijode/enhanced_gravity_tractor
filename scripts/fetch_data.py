@@ -1,8 +1,8 @@
 """Step 1 data fetch: JPL ephemerides, Bennu SBDB record, NASA 3D models, textures, the star sky.
 
-    uv run python -m scripts.fetch_data            # everything (~155 MB download)
+    uv run python -m scripts.fetch_data            # everything (~285 MB download)
     uv run python -m scripts.fetch_data --skip-large   # skip the 77 MB TAG-site patch (Step 5)
-    uv run python -m scripts.fetch_data --only sky     # stars and constellations (d3-celestial, 5.5 MB) -> assets/sky.npz
+    uv run python -m scripts.fetch_data --only sky     # stars, constellations, Milky Way (136 MB) -> assets/sky.npz, milkyway_8k.jpg
 """
 
 import argparse
@@ -164,12 +164,14 @@ def main():
             print("Processing the Nightingale TAG-site model (capture site):")
             print(json.dumps(process_tagsite(paths["bennu_tagsite_v020.glb"]), indent=2))
     if args.only in (None, "sky"):
-        from core.sky import SKY_FILES, SKY_URL, process_sky
+        from core.sky import MILKYWAY_RAW, MILKYWAY_URL, SKY_FILES, SKY_URL, process_milkyway, process_sky
 
         print("Star sky (d3-celestial: XHIP stars to magnitude 8, IAU constellations):")
         for name in SKY_FILES:
             download(name, SKY_URL + name)
         print(json.dumps(process_sky(RAW), indent=2))
+        print("Milky Way background (NASA SVS Deep Star Maps 2020, 8k, 130 MB):")
+        print("  -> assets/milkyway_8k.jpg %d x %d" % process_milkyway(download(MILKYWAY_RAW, MILKYWAY_URL)))
 
 
 if __name__ == "__main__":

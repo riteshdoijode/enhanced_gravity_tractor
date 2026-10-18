@@ -36,6 +36,8 @@ def _smooth(x):
 
 
 class EarthImpactScene(SceneBase):
+    SKY_FULL = True  # a main (centre) view: the 8k Milky Way
+
     def __init__(self, plotter, eph, scenario=None):
         super().__init__(plotter)
         self.eph = eph

@@ -1,5 +1,9 @@
 """Solar System view (center of the window, always): AU, ecliptic J2000 axes, origin = Solar System Barycenter.
 
+The Sun, the eight planets and Pluto at their JPL positions (DE441). An orbit longer than the ephemerides (Neptune
+165 yr, Pluto 248 yr, against 2026-2185) is drawn from them as far as they go and closed with a two-body arc from
+their last state; the bodies themselves are always on the ephemeris part. 🪐 zooms out to the whole system.
+
 The Sun moves around the barycenter (its offset can be drawn exaggerated). Bennu follows the scenario orbit
 (through the 2135 keyhole flyby to the Earth impact), or the deflected orbit during a live run.
 Galactic side view (the 🏠 button): the Solar System seen from the side as it moves around the Milky Way (camera
@@ -12,18 +16,25 @@ import numpy as np
 from pyvista.examples import planets
 
 from app.scenes.base import EQ_TO_ECL, LIVE_COLORS, SceneBase, line, pose
-from core.constants import AU, DAY, YEAR
+from core.constants import AU, DAY, GM, YEAR
 
-PLANETS = {  # name: (display radius AU, color, orbital period days)
-    "mercury": (0.010, "#9c8f86", 87.97),
-    "venus": (0.014, "#e3c48d", 224.70),
-    "earth": (0.018, None, 365.256),
-    "mars_bary": (0.012, "#c1440e", 686.98),
-    "jupiter_bary": (0.040, "#c9a27a", 4332.6),
+PLANETS = {  # name: (marker size px, color, orbital period days)
+    "mercury": (11, "#9c8f86", 87.97),
+    "venus": (11, "#e3c48d", 224.70),
+    "earth": (14, None, 365.256),
+    "mars_bary": (11, "#c1440e", 686.98),
+    "jupiter_bary": (13, "#c9a27a", 4332.6),
+    "saturn_bary": (12, "#e3d19c", 10759.2),
+    "uranus_bary": (11, "#9fd8e0", 30688.5),
+    "neptune_bary": (11, "#5b7fe8", 60182.0),
+    "pluto_bary": (8, "#c8b29a", 90560.0),  # the dwarf planet (Pluto-Charon barycenter)
 }
+NAMES = {"mars_bary": "Mars", "jupiter_bary": "Jupiter", "saturn_bary": "Saturn", "uranus_bary": "Uranus",
+         "neptune_bary": "Neptune", "pluto_bary": "Pluto"}
 BENNU_PERIOD_D = 436.65
 TRACTOR_COLOR = "#3987e5"  # the tractor's plan: the same blue as its launch window on the distance plot
 CAMERA_START = (0.3, -3.6, 2.5)  # AU from the barycenter, ecliptic north up
+CAMERA_WIDE = (8.0, -150.0, 95.0)  # 🪐: the whole system, out to Pluto's orbit (aphelion 49 AU)
 GALACTIC_SLOW = 50.0  # display option: the Galactic motion slowed x1/50 so the planets' helices show
 PATH_YEARS = 4332.6 / 365.25  # traced paths: one orbit of Jupiter behind and ahead
 PATH_POINTS = 1500  # per path (~30 per orbit of Mercury)
@@ -36,6 +47,7 @@ def ecl(P):
 
 class SolarScene(SceneBase):
     SKY_FRAME = EQ_TO_ECL  # the scene is in ecliptic axes
+    SKY_FULL = True  # the main view: the 8k Milky Way
 
     def __init__(self, plotter, eph):
         super().__init__(plotter)
@@ -67,13 +79,12 @@ class SolarScene(SceneBase):
         self.marker("ssb", "#ffffff", 7)
         self._sun_trail_t = None
         t0 = self.eph.span("earth")[0]
-        for name, (rad, color, period) in PLANETS.items():
-            tt = t0 + np.linspace(0.0, period * DAY, 400)
-            self.pl.add_mesh(line(ecl(self.eph.pos(name, tt))), color=color or "#4f8fd9", opacity=0.45,
+        for name, (size, color, period) in PLANETS.items():
+            self.pl.add_mesh(line(self._orbit(name, period, t0)), color=color or "#4f8fd9", opacity=0.45,
                              line_width=1.5, name=f"orbit_{name}", render=False)
-            self.marker(name, color or "#4f8fd9", 14 if name == "earth" else 11)
+            self.marker(name, color or "#4f8fd9", size)
         self.marker("bennu", "#ffb347", 11)
-        self.labels("labels", ["Sun", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Bennu"])
+        self.labels("labels", ["Sun", *(NAMES.get(n, n.title()) for n in PLANETS), "Bennu"])
         self.labels("ssb_label", ["barycenter" + (f" (Sun's wobble ×{self.sun_wobble:g})" if self.sun_wobble > 1 else "")],
                     color="#c3c2b7", size=11)
         self._bennu_orbit_t = None
@@ -84,9 +95,24 @@ class SolarScene(SceneBase):
             self._add_galactic()
         self.reset_camera()
 
-    def reset_camera(self):
+    def _orbit(self, name, period_days, t0):
+        """One orbit (scene AU) from the ephemerides; when it is longer than they are, closed with a two-body arc
+        (Sun + planet) flown on from their last state."""
+        from core.guidance.kepler import propagate
+
+        lo, hi = self.eph.span(name)
+        lo = max(lo, t0)
+        P = period_days * DAY
+        if lo + P <= hi:
+            return ecl(self.eph.pos(name, lo + np.linspace(0.0, P, 400)))
+        arc = self.eph.pos(name, np.linspace(lo, hi, 400))
+        x = np.atleast_2d(self.eph.state(name, hi))[0] - np.atleast_2d(self.eph.state("sun", hi))[0]
+        r, _ = propagate(x[:3], x[3:], np.linspace(0.0, lo + P - hi, 200), mu=GM["sun"] + GM[name])
+        return ecl(np.vstack([arc, r + self.eph.pos("sun", hi)]))
+
+    def reset_camera(self, wide=False):
         c = self.pl.camera
-        c.position, c.focal_point, c.up = CAMERA_START, (0, 0, 0), (0, 0, 1)
+        c.position, c.focal_point, c.up = (CAMERA_WIDE if wide else CAMERA_START), (0, 0, 0), (0, 0, 1)
         self.pl.reset_camera_clipping_range()
 
     # ------------------------------------------------------------------ Galactic side view
