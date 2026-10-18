@@ -770,25 +770,34 @@ class Planner:
         achieved = float((np.asarray(b_after, float) - self.b0) @ d)
         return achieved >= (1.0 - p.dart_tolerance) * self.target_shift(p)
 
-    def dart_result(self, p, b_after, t_now, tractor_launched=False):
+    def dart_result(self, p, b_after, t_now, tractor_launched=False, q_full=None):
         """Verdict on the DARTs once their effect is known (ground tracking): success if they delivered at least
         (1 - tolerance) of the target shift (the tractor then steers the flyby to the aim point); otherwise the
-        shift still missing toward the aim point is for another DART."""
+        shift still missing toward the aim point is for another DART.
+        q_full: the full-model 2135 flyby distance. A push so large that the 2135 encounter no longer happens
+        projects onto the B-plane anywhere (even behind b0 along the push direction); a full-model flyby at or
+        beyond the aim distance is then an overshoot, counted as a success (the tow holds it, no pull-back)."""
         R = self.goal_radius(p)
         d, _ = self.push_direction(p)
         b_after = np.asarray(b_after, float)
         target = self.target_shift(p)
         achieved = float((b_after - self.b0) @ d)
         need_goal = shift_to_circle(b_after, d, R)
+        q = float(np.linalg.norm(b_after))
+        remaining = max(0.0, float((self.aim_point(p) - b_after) @ d))
+        ok = self.dart_success(p, b_after)
+        overshoot = bool(not ok and q_full is not None and q_full >= np.linalg.norm(self.aim_point(p)))
+        if overshoot:  # measured by the full-model distance: the shift along d that puts the flyby there
+            ok, q, remaining = True, float(q_full), 0.0
+            achieved = shift_to_circle(self.b0, d, q)
+            need_goal = 0.0 if q >= R else need_goal
         reach = 0.0
         if not tractor_launched:
             tp, _ = self.plan_tractor(p, t_now, b_after)
             reach = tp.reach if tp.feasible else 0.0
-        remaining = max(0.0, float((self.aim_point(p) - b_after) @ d))
-        ok = self.dart_success(p, b_after)
         return {"success": bool(ok), "achieved": achieved, "target": target, "fraction": achieved / max(target, 1.0),
                 "need_goal": need_goal, "tractor_reach": reach, "remaining": remaining,
-                "q": float(np.linalg.norm(b_after)), "goal": R}
+                "q": q, "goal": R, "overshoot": overshoot}
 
     def outcome(self, p, impacts, tow_start, gt_accel, pending=(), n_beta=400, seed=0, b_offset=None):
         """Projected 2135 point from impacts [(t, dv)] that happened (beta known), planned impacts still on their

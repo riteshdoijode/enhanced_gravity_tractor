@@ -663,8 +663,10 @@ class LiveMission:
                                       f"another DART is needed for {res['remaining'] / 1e3:,.0f} km", "bad")
             return
         self.beta_ground = (float(max(1.0, self.beta_true + self.rng.normal(0, SIGMA_BETA_GROUND))), SIGMA_BETA_GROUND)
+        fc = self.final_check  # the full-model 2135 flyby for these pushes (catches an overshoot, see dart_result)
+        q_full = fc["q"] if fc is not None and "q" in fc and self._check_key == self._push_key() else None
         res = self.planner.dart_result(replace(p, beta=self.beta_ground[0], beta_sigma=SIGMA_BETA_GROUND), b_after,
-                                       self.t, tractor_launched=self.tractor.phase != "waiting")
+                                       self.t, tractor_launched=self.tractor.phase != "waiting", q_full=q_full)
         res.update(result="success" if res["success"] else "short", number=ki.number, t=self.t, b_after=b_after,
                    beta=self.beta_ground)
         self.dart_results.append(res)
@@ -673,10 +675,13 @@ class LiveMission:
         if res["success"]:
             extra = ("the goal is already met" if res["need_goal"] <= 0 else
                      f"{res['need_goal'] / 1e3:,.0f} km still needed for the goal")
+            over = res.get("overshoot")
             self.log(self.t, ki.name, f"DART #{ki.number} SUCCESS: delivered {pct:.0f} % of the {res['target'] / 1e3:,.0f} km "
-                                      f"target (β = {self.beta_ground[0]:.2f} ± {SIGMA_BETA_GROUND:.1f} from tracking); 2135 "
-                                      f"flyby now at {q_ld:.2f} LD, {extra}. The gravity tractor may launch to steer it to "
-                                      "the aim point.", "good")
+                                      f"target ({'an overshoot, measured by the full-model flyby distance; ' if over else ''}"
+                                      f"β = {self.beta_ground[0]:.2f} ± {SIGMA_BETA_GROUND:.1f} from tracking); 2135 "
+                                      f"flyby now at {q_ld:.2f} LD, {extra}. The gravity tractor may launch "
+                                      + ("(it holds an overshoot, no pull-back)." if over else "to steer it to the aim point."),
+                     "good")
         else:
             self.log(self.t, ki.name, f"DART #{ki.number} FELL SHORT: delivered {pct:.0f} % of its "
                                       f"{res['target'] / 1e3:,.0f} km target (needs {100 * (1 - p.dart_tolerance):.0f} %; "

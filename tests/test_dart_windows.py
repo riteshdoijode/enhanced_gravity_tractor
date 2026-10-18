@@ -114,3 +114,27 @@ def test_colour_thresholds_match_the_success_logic(ks):
     assert sel.capability["status"] == "target" and sel.capability["q"] >= LUNAR_DISTANCE
     assert np.isclose(sel.capability["mass_target"], ip.mass_linear, rtol=1e-2)  # porkchop B on whole days
     assert sel.capability["p_target"] >= 0.5  # the planned beta is the median
+
+
+def test_full_model_overshoot_is_a_success(ks):
+    """A DART so large that the 2135 encounter no longer happens (session 2026-10-18: 9,400 kg, full-model flyby at
+    691 LD) projects onto the B-plane behind b0 along the push direction. With the full-model flyby distance the
+    verdict is an overshoot (a success, positive fraction, nothing remaining); without it, or below the aim
+    distance, the linear verdict is unchanged."""
+    _, _, pl = ks
+    p = MissionParams(dart_target_km=319_000.0)
+    t_now = iso_to_t("2043-01-01")
+    d, _ = pl.push_direction(p)
+    target, aim = pl.target_shift(p), float(np.linalg.norm(pl.aim_point(p)))
+    b_far = pl.b0 - 87e9 * d  # what the 691 LD full-model flyby projected to (shift along d: -87 million km)
+    old = pl.dart_result(p, b_far, t_now, tractor_launched=True)
+    assert not old["success"] and old["fraction"] < 0 and not old["overshoot"]
+    r = pl.dart_result(p, b_far, t_now, tractor_launched=True, q_full=691.0 * LUNAR_DISTANCE)
+    assert r["success"] and r["overshoot"] and r["remaining"] == 0.0 and r["need_goal"] == 0.0
+    assert r["q"] == 691.0 * LUNAR_DISTANCE and r["fraction"] > 100.0
+    assert np.isclose(np.linalg.norm(pl.b0 + r["achieved"] * d), r["q"], rtol=1e-9)
+    # a short DART stays short when the full model agrees it is short of the aim distance
+    b_short = pl.b0 + 0.5 * target * d
+    s = pl.dart_result(p, b_short, t_now, tractor_launched=True, q_full=0.999 * aim)
+    assert not s["success"] and not s["overshoot"]
+    assert s == {**pl.dart_result(p, b_short, t_now, tractor_launched=True), "tractor_reach": s["tractor_reach"]}
