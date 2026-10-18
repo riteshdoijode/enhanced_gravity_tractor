@@ -2,7 +2,8 @@
 
 World frame: the local site frame at the boulder (x east, y north, z up = -effective gravity), origin on
 the terrain under the boulder. The terrain is a heightfield cut from the OSIRIS-REx 5 cm Nightingale
-model. Physics: MuJoCo rigid-body contact; gravity = the effective gravity at the site (polyhedron +
+model (the default site), or ray-cast on the global shape model at any other site the scan picked
+(core/proximity/boulders.py: Site). Physics: MuJoCo rigid-body contact; gravity = the effective gravity at the site (polyhedron +
 centrifugal, ~7e-5 m/s^2); because this frame rotates with Bennu, every body also gets the Coriolis force
 -2 m w x v (at 2 cm/s that is ~20 % of the weight, so it is not negligible).
 
@@ -42,7 +43,7 @@ def _min_jerk(s):
     return 10 * s**3 - 15 * s**4 + 6 * s**5, (30 * s**2 - 60 * s**3 + 30 * s**4), (60 * s - 180 * s**2 + 120 * s**3)
 
 
-def boulder_mesh(mass, seed=7, aspect=(1.3, 1.0, 0.75)):
+def boulder_mesh(mass, seed=7, aspect=(1.3, 1.0, 0.75), density=BOULDER_DENSITY):
     """Irregular convex rock: a jittered ellipsoid scaled so its hull has volume mass / density."""
     import trimesh
 
@@ -50,7 +51,7 @@ def boulder_mesh(mass, seed=7, aspect=(1.3, 1.0, 0.75)):
     ico = trimesh.creation.icosphere(subdivisions=2)
     v = ico.vertices * np.asarray(aspect) * (1.0 + 0.12 * rng.uniform(-1, 1, (len(ico.vertices), 1)))
     hull = trimesh.Trimesh(v, process=True).convex_hull
-    s = (mass / BOULDER_DENSITY / hull.volume) ** (1.0 / 3.0)
+    s = (mass / density / hull.volume) ** (1.0 / 3.0)
     hull.apply_scale(s)
     hull.apply_translation(-hull.center_mass)
     return hull
@@ -174,8 +175,14 @@ class Capture:
     """The capture sequence, stepped in time; poses are available for rendering at any moment."""
 
     def __init__(self, m_spacecraft, m_boulder, thrust_max, bus_pos0=None, bus_vel0=None, dt=0.01,
-                 gravity=None, omega_local=None, terrain=True, coriolis=True, seed=7):
-        origin, R_site, g_local = site_frame()
+                 gravity=None, omega_local=None, terrain=True, coriolis=True, seed=7, site=None,
+                 aspect=(1.3, 1.0, 0.75), density=BOULDER_DENSITY):
+        """site: a core/proximity/boulders.py Site (origin, R, g_local, heightfield); None = the Nightingale
+        default. seed / aspect / density: the boulder's shape and true density (its mass is m_boulder)."""
+        if site is None:
+            origin, R_site, g_local = site_frame()
+        else:
+            origin, R_site, g_local = site.origin, site.R, site.g_local
         self.R_site, self.site_origin = R_site, origin
         self.gravity = np.asarray(g_local if gravity is None else gravity, float)
         self.omega = (R_site.T @ np.array([0.0, 0.0, BENNU["omega"]])) if omega_local is None else np.asarray(omega_local)
@@ -184,8 +191,8 @@ class Capture:
         self.m_boulder = float(m_boulder)
         m_arm = sum(ARM_MASS[k] for k in ("base", "upper", "fore", "wrist", "palm")) + FINGERS * (ARM_MASS["finger"] + 1.0)
         self.m_spacecraft = float(m_spacecraft)
-        self.boulder_hull = boulder_mesh(m_boulder, seed=seed)
-        g, Z = _hfield()
+        self.boulder_hull = boulder_mesh(m_boulder, seed=seed, aspect=aspect, density=density)
+        g, Z = _hfield() if site is None else (site.grid, site.heights)
         zmin, zmax = float(Z.min()), float(Z.max())
         params = dict(dt=dt, gravity=self.gravity, zmin=zmin, zmax=zmax, m_bus=m_spacecraft - m_arm,
                       boulder_density=m_boulder / self.boulder_hull.volume)
@@ -246,19 +253,34 @@ class Capture:
 
     # ------------------------------------------------------------------ setup helpers
     def _place_boulder(self, g, Z):
+        """The boulder at rest under the site origin, lying on the local slope (its flattest side on the ground,
+        tilted with the terrain's mean plane within 2 m): a level rock on a 20-degree slope stands on one edge and
+        rolls away from the claws."""
         m, d = self.model, self.data
         adr = m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, "boulder")]
         v = self.boulder_hull.vertices
+        quat = np.array([1.0, 0, 0, 0])
         if Z is None:
             z = -v[:, 2].min() + 0.01
         else:
             from scipy.interpolate import RegularGridInterpolator
 
+            X, Y = np.meshgrid(g, g)
+            near = np.hypot(X, Y) <= 2.0
+            (a, b, _), *_ = np.linalg.lstsq(np.column_stack([X[near], Y[near], np.ones(near.sum())]), Z[near], rcond=None)
+            n = np.array([-a, -b, 1.0]) / np.sqrt(a * a + b * b + 1.0)
+            axis = np.cross([0, 0, 1.0], n)
+            ang = float(np.arcsin(min(1.0, np.linalg.norm(axis))))
+            if ang > 1e-6:
+                quat = np.concatenate([[np.cos(ang / 2)], np.sin(ang / 2) * axis / np.linalg.norm(axis)])
+            Rb = np.zeros(9)
+            mujoco.mju_quat2Mat(Rb, quat)
+            v = v @ Rb.reshape(3, 3).T
             f = RegularGridInterpolator((g, g), Z, bounds_error=False, fill_value=0.0)
             terrain_under = f(np.column_stack([v[:, 1], v[:, 0]]))
             z = float(np.max(terrain_under - v[:, 2])) + 0.005
         d.qpos[adr:adr + 3] = [0.0, 0.0, z]
-        d.qpos[adr + 3:adr + 7] = [1, 0, 0, 0]
+        d.qpos[adr + 3:adr + 7] = quat
         self.boulder_qadr = adr
         self.boulder_top = z + v[:, 2].max()
 
@@ -524,8 +546,9 @@ class Capture:
         self.stage = "finished"
         held = np.linalg.norm(d.xpos[self.boulder_id] - d.site_xpos[self.palm_site])
         lifted = d.xpos[self.boulder_id][2] - self.log.boulder[0][2] if self.log.boulder else 0.0
-        self.result = {
-            "success": bool(abs(held - (self._palm_to_boulder or held)) < 0.15 and lifted > 2.0),
+        self.result = {  # (a boulder "lifted" far beyond the 3 m lift and the stow was thrown by a contact blow-up)
+            "success": bool(abs(held - (self._palm_to_boulder or held)) < 0.15 and 2.0 < lifted < 10.0
+                            and np.all(np.isfinite(d.qpos))),
             "lifted_m": float(lifted), "grip_slip_m": float(abs(held - (self._palm_to_boulder or held))),
             "peak_joint_torque": self.peak_tau, "peak_tracking_rad": self.peak_track,
             "duration_s": self.t, "thrust_impulse_Ns": self.force_used,

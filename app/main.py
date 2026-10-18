@@ -311,6 +311,8 @@ class MainWindow(QtWidgets.QMainWindow):
         c.launch_dart.clicked.connect(self._on_launch_dart)
         c.launch_tractor.clicked.connect(self._on_launch_tractor)
         c.release.clicked.connect(self._on_release)
+        c.descend.clicked.connect(self._on_descend)
+        c.stones.currentRowChanged.connect(lambda _: self._on_stone_highlight())
         c.storm.clicked.connect(lambda: self.sim and self.sim.send("storm", c.storm_days.value()))
         c.skip.clicked.connect(lambda: self.sim and self.sim.send("skip"))
         c.finish.clicked.connect(lambda: self.sim and self.sim.send("finish"))
@@ -857,6 +859,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.next_dart = self.next_tractor = None
         self._tr_ahead, self._tr_planned_t, self._tractor_window, self._tr_want_window = None, -np.inf, None, True
         self._tr_sent = False
+        self._scan_logged = None
         self._aftermath = None
         self.distance.set_tractor(None)
         self._next_choice = -1
@@ -978,6 +981,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_tractor_status(self._last_snap or {})
         self.craft_mode.button(0).setChecked(True)
 
+    def _on_stone_highlight(self):
+        """A stone selected in the list is highlighted in the Bennu view (and the Descend button follows)."""
+        key = self.controls.selected_stone()
+        self.bennu.set_highlight(key)
+        if key is None:  # (the list was cleared)
+            return
+        self.log.write("action", what="stone selected in the list", stone=key)
+        self.bennu.look_at_stone(key)
+        pr = ((self._last_snap or {}).get("tractor") or {}).get("prox")
+        self.controls.descend.setEnabled(bool(pr and pr.get("awaiting_choice")) and key is not None)
+        if self.sim is not None:
+            _draw(self.p_bennu)
+
+    def _on_descend(self):
+        """The stone to pick up: the tractor leaves its scan point for 780 m above it, then descends."""
+        key = self.controls.selected_stone()
+        self.log.write("action", what="descend to stone pressed", stone=key, live=self.sim is not None)
+        if self.sim is not None and key is not None:
+            self.sim.send("select_boulder", key)
+            self.controls.descend.setEnabled(False)
+
     def _on_release(self):
         """End of the tow on command: the tractor lets the boulder go and leaves Bennu (core/mission.py end_tow)."""
         self.log.write("action", what="release pressed", live=self.sim is not None)
@@ -1094,6 +1118,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return "grey", "<b>Launch ordered:</b> the tractor leaves the parking orbit…"
         if s.get("tractor_launched"):
             pr = tr.get("prox")
+            if pr and pr.get("awaiting_choice"):
+                return "green", ("<b>Scan complete:</b> choose the stone to pick up below (★ recommended), then "
+                                 "<b>⬇ Descend to this stone</b>. The clock waits for your choice.")
+            if pr and pr["phase"] == "scan":
+                sc = pr.get("scan") or {}
+                return "grey", (f"<b>Scanning Bennu</b> for boulders: {100 * sc.get('coverage', 0.0):.0f} % mapped, "
+                                f"{len(pr.get('stones') or [])} stones found so far.")
             where = (f"at Bennu: {pr['phase']}" if pr else f"{tr.get('phase', '')}, arrival {t_to_utc_str(tr['eta'])[:10]}"
                      if np.isfinite(tr.get("eta", np.nan)) else tr.get("phase", ""))
             return "grey", f"<b>Launched</b> {t_to_utc_str(tr['t_launch'])[:10]} — {where}."
@@ -1199,6 +1230,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tractor_planning(s, results)
         self._update_tractor_status(s)
         pr = (s.get("tractor") or {}).get("prox")
+        self.controls.set_stones(pr)
+        self._log_scan(pr)
         self.controls.set_release_ready(pr is not None and pr["phase"] in ("station", "parked")
                                         and not s.get("tow_complete"))
         if len(results) > self._results_seen:
@@ -1248,6 +1281,20 @@ class MainWindow(QtWidgets.QMainWindow):
         for plot, kind in ((self.live_plots, "add"), (self.prox_plots, "add"), (self.bplane, "bplane")):
             if f % (5 if bottom is plot else 20) == 0:
                 plot.update_live(s["outlook"]) if kind == "bplane" else plot.add_snapshot(s)
+
+    def _log_scan(self, pr):
+        """Session log: the stones the scan offered (once, when it ends) and the stone taken."""
+        scan = (pr or {}).get("scan")
+        if not scan or not scan.get("complete"):
+            return
+        key = (tuple(st["key"] for st in pr.get("stones") or []), pr.get("chosen"))
+        if key == getattr(self, "_scan_logged", None):
+            return
+        self._scan_logged = key
+        self.log.write("result", what="scan stones", coverage=scan.get("coverage"), recommended=scan.get("recommended"),
+                       chosen=pr.get("chosen"), awaiting=pr.get("awaiting_choice"),
+                       stones=[{k: st[k] for k in ("key", "d_est", "mass_est", "mass_sigma", "slope", "feasible", "why")}
+                               for st in pr.get("stones") or []])
 
     def _log_snap(self, s, results):
         """Session log: the mission's new events, and a state summary when it changes (every 5 s otherwise)."""
@@ -1320,6 +1367,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.bennu.live = s
                 self.bennu._update_live()
                 self.bennu.reset_camera()
+            elif phase in ("scan",):
+                self.bennu.live = s
+                self.bennu._update_live()
+                self.bennu.frame_scan()
+            elif phase == "choose":  # the scan is done: look at the recommended stone (the list's selection)
+                self.bennu.live = s
+                key = self.controls.selected_stone() or (pr.get("scan") or {}).get("recommended")
+                self.bennu.set_highlight(key)
+                self.bennu.look_at_stone(key)
             elif phase in ("survey", "transfer", "station", "parked", "release", "depart"):
                 self.bennu.reset_camera()
             elif phase == "departed":  # the tractor has left: back to Bennu itself
@@ -1536,6 +1592,10 @@ def _smoke_live(win, app, mode):
             if tag not in st["shots"]:
                 st["shots"].add(tag)
                 _shot(win, f"app_prox_{pr['phase']}")
+            if pr.get("awaiting_choice") and not st.get("chose"):
+                st["chose"] = _click_stone(win, (pr.get("scan") or {}).get("recommended")) and press(win.controls.descend)
+                if st["chose"]:
+                    _shot(win, "app_prox_scan_choice")
             if pr["phase"] in ("station", "parked") and i % 10 == 0 and not st.get("released"):
                 st["released"] = press(win.controls.release)  # the tow ends as a user ends it: ⤒ Release
             if st.get("released") and not st.get("finished") and pr["phase"] in ("release", "depart", "departed"):
@@ -1553,6 +1613,20 @@ def _smoke_live(win, app, mode):
     timer.timeout.connect(step)
     timer.start(1000)
     return timer
+
+
+def _click_stone(win, key):
+    """Click a stone in the scan's list as a user does (the row's centre in the list's viewport)."""
+    from PySide6.QtTest import QTest
+
+    lw = win.controls.stones
+    for i in range(lw.count()):
+        item = lw.item(i)
+        if item.data(QtCore.Qt.UserRole) == key:
+            lw.scrollToItem(item)
+            QTest.mouseClick(lw.viewport(), QtCore.Qt.LeftButton, pos=lw.visualItemRect(item).center())
+            return win.controls.selected_stone() == key
+    return False
 
 
 def _smoke_windows(win, app, heavier=2000.0):

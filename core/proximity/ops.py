@@ -5,8 +5,12 @@ After the cruise hand-over (< 100 km), in the Bennu-centered frame with ICRF axe
     standoff  -> only if a DART is still on its way: hold 10 km from Bennu, off the impactor's path, until
                  the impact has happened; the navigation filter measures beta from the jump in Bennu's
                  velocity (in the keyhole mission the tractor launches after the impact, so it goes
-                 straight to the survey)
-    survey    -> hover 780 m above the capture site, co-rotating with Bennu (body frame)
+                 straight to the scan)
+    scan      -> hold 2 km out on the sunlit side while Bennu turns once (4.3 h): a fan of LIDAR shots maps the
+                 surface and finds the stones that can be picked up (core/proximity/boulders.py)
+    choose    -> hold there until a stone is chosen (in the app the run pauses for the user; headless runs take
+                 the recommended stone), then approach to 780 m above it
+    survey    -> hover 780 m above the chosen stone, co-rotating with Bennu (body frame)
     descent   -> down the site's vertical inside a glide-slope cone (LQR or MPC, body frame)
     capture   -> MuJoCo arm grasps and lifts the boulder (core/proximity/capture.py)
     ascent    -> climb back up with the boulder (body frame)
@@ -30,7 +34,7 @@ from core.constants import AU, BENNU, G0, GM
 from core.control.prox import LQR, MPC, relative_model, weights
 from core.dynamics.asteroid import bennu_attitude, omega_body
 from core.dynamics.perturbations import P_SUN, cylindrical_shadow
-from core.proximity import sensors
+from core.proximity import boulders, sensors
 from core.proximity.capture import Capture, site_frame
 from core.proximity.ekf import ProxEKF
 
@@ -44,11 +48,12 @@ THRUST_MAG_ERR, THRUST_DIR_ERR = 0.01, np.radians(0.3)
 LIFT_MARGIN = 1.3  # required thrust / weight of spacecraft + boulder at the site
 WAIT_FOR_THRUST = 14 * 86400.0
 PHASE_DT = {  # control period [s] per phase (truth integrates 3 RK4 steps per period)
-    "approach": 300.0, "standoff": 1800.0, "survey": 60.0, "descent": 20.0, "ascent": 20.0,
+    "approach": 300.0, "standoff": 1800.0, "scan": 60.0, "choose": 300.0, "survey": 60.0, "descent": 20.0,
+    "ascent": 20.0,
     "transfer": 30.0, "station": 60.0, "parked": 600.0, "release": 60.0, "depart": 30.0, "departed": 3600.0,
 }
-BANDWIDTH = {"parked": 5e-4, "standoff": 2e-4, "survey": 3e-3, "descent": 6e-3, "ascent": 6e-3, "transfer": 4e-3,
-             "station": 3e-3, "release": 3e-3, "depart": 4e-3}
+BANDWIDTH = {"parked": 5e-4, "standoff": 2e-4, "scan": 2e-3, "choose": 2e-3, "survey": 3e-3, "descent": 6e-3,
+             "ascent": 6e-3, "transfer": 4e-3, "station": 3e-3, "release": 3e-3, "depart": 4e-3}
 HOLD_DETAIL_S = 86400.0  # s on station flown with the closed-loop controller before the averaged tow model
 RELEASE_HOLD_S = 1800.0  # s the craft holds at the release point after letting the boulder go
 DEPART_RADIUS = 50e3  # m: the departure climbs to here (where the pull on Bennu no longer counts), then burns
@@ -97,8 +102,14 @@ class ProxEnvironment:
 
         self.grav = BennuGravity()
         self.ray = sensors.ShapeRaycaster()
-        self.site_origin, self.site_R, self.site_g = site_frame()
+        self.site_origin, self.site_R, self.site_g = site_frame()  # the default capture site (Nightingale)
         self.site_up = self.site_R[:, 2]
+        self._nightingale = None
+
+    def nightingale(self):
+        if self._nightingale is None:
+            self._nightingale = boulders.nightingale_site()
+        return self._nightingale
 
 
 class ProximityOps:
@@ -126,9 +137,16 @@ class ProximityOps:
         self.capture_result = None
         self.sc_shape = self.capture.craft_shape(False) if self.capture is not None else []
         self.boulder_mesh = self.capture.boulder_mesh_data() if self.capture is not None else None
+        # the stone to pick up is found by the scan and chosen (select); until then no boulder of the plan is
+        # drawn on the surface (the scan's stones are, core/proximity/boulders.py)
+        self.do_scan = self.capture is not None
         self.boulder_rest = None
-        if self.capture is not None:  # boulder at rest on the surface (site frame) until captured
-            self.boulder_rest = [g for g in self.capture.poses() if g[0] == "boulder"][0]
+        self.boulder_key = None  # the chosen stone (the boulder mesh changes with it)
+        self.stones = None
+        self.scan = None
+        self.scan_dir = None
+        self.chosen = None
+        self.preselect = getattr(mission, "_boulder_pick", None)  # a choice made before the scan ended (re-fly)
         self.boulder_free = None  # the boulder after its release: (geom, inertial position, rotation), fixed
         self.t_release = self.t_departed = np.nan
         self.t_station = np.nan
@@ -144,8 +162,9 @@ class ProximityOps:
         self.e_station = (tow / np.linalg.norm(tow)) if tow is not None else self._sun_dir()
         self.d_station = tp.hover_distance_m if np.isfinite(tp.hover_distance_m) \
             else 2 * BENNU["radius"]
-        self.site_body = env.site_origin
-        self.survey_body = env.site_origin + SURVEY_ALT * env.site_up
+        self.site = env.nightingale()  # the capture site (the chosen stone's, once chosen)
+        self.site_body = self.site.origin
+        self.survey_body = self.site.origin + SURVEY_ALT * self.site.up
         self.phase = None
         self.phase_done = {}
         self._was_safe = mission.safe_mode(t0)
@@ -244,6 +263,14 @@ class ProximityOps:
             self.hold = ("inertial", self.d_station * self.e_station)
             self.after_approach = "station"
             why = "approach to the tractor station"
+        elif self.do_scan and self.chosen is None:
+            if self.scan_dir is None:
+                self.scan_dir = self._sun_dir()  # sunlit side, near Bennu's equator (its pole is ~ normal to its orbit)
+            self.hold = ("inertial", boulders.SCAN_RANGE * self.scan_dir)
+            done = self.scan is not None and self.scan.complete
+            self.after_approach = "choose" if done else "scan"
+            why = (f"approach to the scan point {boulders.SCAN_RANGE / 1e3:.0f} km out on the sunlit side"
+                   + (" (the scan is done: waiting for the choice of stone)" if done else ""))
         else:
             self.hold = ("body", self.survey_body)
             self.after_approach = "survey"
@@ -262,6 +289,8 @@ class ProximityOps:
         R = bennu_attitude(self.t)
         refs = {"standoff": getattr(self, "hold", ("inertial", p))[1], "survey": R @ self.survey_body,
                 "station": self.d_station * self.e_station, "parked": D_PARK * self.e_station}
+        if self.scan_dir is not None:
+            refs["scan"] = refs["choose"] = boulders.SCAN_RANGE * self.scan_dir
         off = np.linalg.norm(p - refs[self.phase]) if self.phase in refs else np.inf
         if off > 300.0:
             self.m.log(self.t, "tractor", f"Safe mode over: {off / 1e3:,.1f} km from where the {self.phase} phase "
@@ -454,8 +483,14 @@ class ProximityOps:
                 self.t_station = self.t
                 self._set_phase("station", f"On station {self.d_station:,.0f} m from Bennu's center: the gravity "
                                            f"tractor is towing ({self.mass / 1e3:,.1f} t)", "good")
+            elif self.after_approach == "scan":
+                self._start_scan()
+            elif self.after_approach == "choose":
+                self._set_phase("choose")
             else:
-                self._set_phase("survey", "Surveying the capture site (Nightingale crater, 56°N 43°E) from 780 m")
+                lat, lon = self._site_latlon()
+                self._set_phase("survey", f"Surveying the capture site ({self.site.name}, {abs(lat):.0f}°"
+                                          f"{'N' if lat >= 0 else 'S'} {lon:.0f}°E) from 780 m")
             self._control_phase_now()
             return
         rT, vT = self._hold_inertial(self.t_go_f)
@@ -687,6 +722,107 @@ class ProximityOps:
             return self.tr_target[0] * self.tr_target[1], np.zeros(3), np.zeros(3)
         return p, v, a
 
+    # ---- scan for boulders, choose the stone (core/proximity/boulders.py)
+    def _site_latlon(self):
+        o = self.site.origin
+        return (float(np.degrees(np.arcsin(o[2] / np.linalg.norm(o)))), float(np.degrees(np.arctan2(o[1], o[0])) % 360.0))
+
+    def _start_scan(self):
+        if self.scan is None:
+            self.stones = boulders.population(self.m, self.env, self.t)
+            self.scan = boulders.Scan(self.stones, self.t, np.random.default_rng([int(getattr(self.m, "seed", 0)), 13]))
+            debris = sum(st.kind == "debris" for st in self.stones)
+            self._set_phase("scan", f"LIDAR scan for boulders from {boulders.SCAN_RANGE / 1e3:.0f} km: Bennu turns once "
+                                    f"under the beams ({self.scan.period / 3600:.1f} h)"
+                                    + (f"; {debris} DART debris boulders came to rest on the surface" if debris else ""))
+        else:  # back after a safe-mode drift: the scan goes on
+            self._set_phase("scan", "LIDAR scan resumed")
+
+    def _ctl_scan(self):
+        p_hold = self.hold[1]
+        self._track_inertial("scan", lambda t: (p_hold, np.zeros(3), np.zeros(3)), keepout=False)
+        found = self.scan.sweep(self.t, self.x[:3], bennu_attitude(self.t), self.env, PHASE_DT["scan"], self.tr.thrust,
+                                self.m_sc)
+        for st in found:
+            n = self.stones.index(st) + 1
+            self.m.log(self.t, "tractor", f"Scan: stone #{n} found ({'DART debris' if st.kind == 'debris' else st.name}, "
+                                          f"{st.lat:+.0f}° {st.lon:.0f}°E): ≈ {st.d_est:.1f} m, ≈ {st.mass_est / 1e3:.0f} ± "
+                                          f"{st.mass_sigma / 1e3:.0f} t" + ("" if st.feasible else f" — {st.why}"))
+        if self.scan.scanned >= self.scan.period - 1.0:
+            self._finish_scan()
+
+    def _finish_scan(self):
+        sc = self.scan
+        sc.complete = True
+        sc.beams = []
+        found = [st for st in self.stones if st.detected]
+        rec = boulders.recommend(self.stones, self.m.p.boulder_mass_kg)
+        sc.recommended = rec.key if rec is not None else None
+        ok = sum(st.feasible for st in found)
+        if rec is None:
+            self.m.log(self.t, "tractor", f"Scan complete ({100 * sc.coverage():.0f} % of the surface): no stone the arm "
+                                          "can lift: continuing as a classic gravity tractor", "warn")
+            self.m_boulder = 0.0
+            self.do_scan = False
+            self._start_transfer()
+            return
+        n = self.stones.index(rec) + 1
+        self.m.log(self.t, "tractor", f"Scan complete ({100 * sc.coverage():.0f} % of the surface): {len(found)} stones, "
+                                      f"{ok} the arm can lift; recommended #{n} ({rec.name}, ≈ {rec.mass_est / 1e3:.0f} t, "
+                                      f"closest to the planned {self.m.p.boulder_mass_kg / 1e3:.0f} t)", "good")
+        self._set_phase("choose")
+        pick = self.preselect
+        if pick is not None and self.select(pick):
+            return
+        if pick is not None:
+            self.m.log(self.t, "mission", "The stone chosen before is not among this run's stones: the recommended one "
+                                          "is taken", "warn")
+            self.select(rec.key)
+        elif getattr(self.m, "boulder_choice", "recommended") != "ask":
+            self.m.log(self.t, "tractor", "Headless run: the recommended stone is taken")
+            self.select(rec.key)
+
+    def _ctl_choose(self):
+        p_hold = self.hold[1]
+        self._track_inertial("choose", lambda t: (p_hold, np.zeros(3), np.zeros(3)), keepout=False)
+
+    def awaiting_choice(self):
+        return self.phase == "choose" and self.chosen is None
+
+    def select(self, key):
+        """The stone to pick up (core/mission.py select_boulder). Before the scan has ended the choice is kept for
+        then (a re-simulation replays it). True if taken."""
+        if self.chosen is not None or self.has_boulder or self.capture_result is not None or not self.do_scan:
+            return False
+        if self.phase != "choose":
+            self.preselect = key
+            return True
+        st = next((x for x in self.stones if x.key == key and x.detected), None)
+        if st is None or not st.feasible:
+            if st is not None:
+                self.m.log(self.t, "tractor", f"{st.name}: cannot be picked up ({st.why})", "warn")
+            return False
+        from core.dynamics.asteroid import omega_body
+
+        site = boulders.make_site(self.env, st, omega_body(self.t))
+        self.capture = Capture(self.m_sc, st.mass, self.tr.thrust, site=site, seed=st.seed, aspect=st.aspect,
+                               density=st.density)
+        self.sc_shape = self.capture.craft_shape(False)
+        self.boulder_mesh = self.capture.boulder_mesh_data()
+        self.boulder_rest = [g for g in self.capture.poses() if g[0] == "boulder"][0]
+        self.boulder_key = st.key
+        self.m_boulder = st.mass
+        self.site = site
+        self.site_body = site.origin
+        self.survey_body = site.origin + SURVEY_ALT * site.up
+        self.chosen = st.key
+        n = self.stones.index(st) + 1
+        self.m.log(self.t, "tractor", f"Stone #{n} chosen ({st.name}, {st.lat:+.0f}° {st.lon:.0f}°E, ≈ {st.d_est:.1f} m, "
+                                      f"≈ {st.mass_est / 1e3:.0f} ± {st.mass_sigma / 1e3:.0f} t, slope {st.slope:.0f}°, "
+                                      f"terrain: {site.terrain})", "good")
+        self._start_approach()
+        return True
+
     # ---- body-frame hover / descent / ascent
     def _track_body(self, phase, ref, glide=True, dt=None):
         """ref(t) -> (p_b, v_b, a_b) in Bennu's body frame; command returned inertial."""
@@ -697,7 +833,7 @@ class ProximityOps:
         W = omega_body(self.t)
         key = key + (round(float(W[2]) * 1e9),)
         ctrl = self._controller(key, lambda: self._make(*relative_model(G, dt, omega=W), phase,
-                                                        glideslope=(self.env.site_up, GLIDESLOPE) if glide else None))
+                                                        glideslope=(self.site.up, GLIDESLOPE) if glide else None))
         N = getattr(ctrl, "N", 1)
         ts = self.t + dt * np.arange(N)
         refs = [ref(tk) for tk in ts]
@@ -711,13 +847,13 @@ class ProximityOps:
         uff = Ab - env_b - fict
         pb, vb = self._to_body(self.t, self.ekf.x[:3], self.ekf.x[3:6])
         dx = np.concatenate([pb - refs[0][0], vb - refs[0][1]])
-        axes = np.tile(self.env.site_up, (N, 1))
+        axes = np.tile(self.site.up, (N, 1))
         gs = np.array([pk - self.site_body for pk, _, _ in refs]) if glide else None
         u_b, _ = ctrl.command(dx, uff, axes, self.a_max, gamma=None, glideslope=gs)
         self.u = bennu_attitude(self.t) @ u_b
 
     def _lift_thrust_needed(self):
-        g = np.linalg.norm(self.env.site_g)
+        g = np.linalg.norm(self.site.g_local)
         return LIFT_MARGIN * (self.m_sc + self.m_boulder) * g
 
     def _ctl_survey(self):
@@ -750,7 +886,7 @@ class ProximityOps:
     def _start_descent(self):
         cap = self.capture
         cap.thrust_max = self.tr.thrust
-        self.descent_target = self.site_body + self.env.site_R @ cap.bus_ref0  # bus center, body frame
+        self.descent_target = self.site_body + self.site.R @ cap.bus_ref0  # bus center, body frame
         pb, _ = self._to_body(self.t, self.ekf.x[:3], self.ekf.x[3:6])
         self.desc_from = pb
         h = np.linalg.norm(pb - self.descent_target)
@@ -780,7 +916,7 @@ class ProximityOps:
 
     def _start_capture(self):
         cap = self.capture
-        R = self.env.site_R
+        R = self.site.R
         cap.omega = R.T @ omega_body(self.t)  # the spin may have changed at the impact
         pb, vb = self._to_body(self.t, self.x[:3], self.x[3:])
         loc_p = R.T @ (pb - self.site_body)
@@ -811,8 +947,8 @@ class ProximityOps:
             self.cap_stage = cap.stage
         # spacecraft (bus) position for display / truth bookkeeping
         bus_p, bus_v = cap.bus_state()
-        pb = self.site_body + self.env.site_R @ bus_p
-        vb = self.env.site_R @ bus_v
+        pb = self.site_body + self.site.R @ bus_p
+        vb = self.site.R @ bus_v
         self.x = np.concatenate(self._from_body(self.t, pb, vb))
         if cap.stage == "finished":
             self._finish_capture()
@@ -822,7 +958,7 @@ class ProximityOps:
         res = cap.result
         self.capture_result = res
         mp = res["mass"]
-        R = self.env.site_R
+        R = self.site.R
         # merged spacecraft: center of mass of bus + arm + boulder
         jac_v = cap.momentum() / mp["mass"]
         pb = self.site_body + R @ mp["com"]
@@ -842,8 +978,8 @@ class ProximityOps:
         old = self.ekf
         self.ekf = ProxEKF(x_est, sigma_p=0.3, sigma_v=0.003, beta0=old.x[9], sigma_beta=np.sqrt(old.P[9, 9]))
         self.asc_from = pb
-        self.asc_to = self.site_body + 200.0 * self.env.site_up
-        self.asc_T = max(1.875 * 190.0 / 0.15, np.sqrt(5.77 * 190.0 / (0.3 * max(self.a_max - np.linalg.norm(self.env.site_g), 1e-7))))
+        self.asc_to = self.site_body + 200.0 * self.site.up
+        self.asc_T = max(1.875 * 190.0 / 0.15, np.sqrt(5.77 * 190.0 / (0.3 * max(self.a_max - np.linalg.norm(self.site.g_local), 1e-7))))
         self._set_phase("ascent", f"Ascent to 200 m with {self.mass / 1e3:,.1f} t")
 
     def _ascent_ref(self, t):
@@ -903,8 +1039,13 @@ class ProximityOps:
             "station": self.d_station * self.e_station, "t_station": self.t_station,
             "mpc_fallbacks": self.mpc_fallbacks, "t_release": self.t_release, "t_departed": self.t_departed,
             "boulder_free": None if self.boulder_free is None else self.boulder_free[1].copy(),
+            "boulder_key": self.boulder_key, "site_name": self.site.name, "awaiting_choice": self.awaiting_choice(),
+            "chosen": self.chosen,
         }
-        Rs, o = self.env.site_R, self.site_body
+        if self.scan is not None:  # the scan, its coverage map (while it matters) and the stones it found
+            s["scan"] = self.scan.snapshot(with_map=self.phase in ("scan", "choose") and self.chosen is None)
+            s["stones"] = [dict(st.to_dict(), index=k + 1) for k, st in enumerate(self.stones) if st.detected]
+        Rs, o = self.site.R, self.site_body
         to_i = lambda p, Rm: (R @ (o + Rs @ p), R @ Rs @ Rm)  # site frame -> Bennu-centered ICRF
         if self.phase == "capture":  # the arm's own close-range sensing guides the grasp; the EKF is paused
             s["capture_stage"] = self.capture.stage
@@ -922,7 +1063,7 @@ class ProximityOps:
                 s["geoms"].append((n, ty, sz, rgba, p, Rm))
         s["boulder_mesh"] = self.boulder_mesh
         s["boresight_target"] = R @ self.site_body if self.phase in ("survey", "descent", "ascent") else np.zeros(3)
-        s["site"] = R @ self.site_body
+        s["site"] = None if self.do_scan and self.chosen is None else R @ self.site_body  # (no site before the choice)
         return s
 
     def attitude(self):
@@ -930,7 +1071,7 @@ class ProximityOps:
         Bennu's center elsewhere (attitude control assumed to track this outside the capture)."""
         R = bennu_attitude(self.t)
         if self.phase in ("survey", "descent", "ascent"):
-            return R @ self.env.site_R
+            return R @ self.site.R
         z = self.x[:3] / max(np.linalg.norm(self.x[:3]), 1e-9)
         x = np.cross([0.0, 0.0, 1.0], z)
         x /= max(np.linalg.norm(x), 1e-9)

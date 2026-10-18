@@ -174,6 +174,9 @@ class EjectaCloud:
         vel, self.mass_each = sample_ejecta(n, p_ej_mag, n_i, self.v_esc, rng)
         self.v_launch = np.linalg.norm(vel, axis=1)
         surf_v = np.cross(R @ OMEGA_B, r_i)  # launched from the rotating surface
+        self.seed = int(seed)
+        self._launch = (r_i, n_i, surf_v)
+        self.fragments = None  # DART debris boulders where they came to rest (_fly_fragments), once computed
         self.x = np.tile(r_i + 0.5 * n_i, (n, 1))
         self.v = vel + surf_v
         self.code = np.zeros(n, int)
@@ -234,7 +237,43 @@ class EjectaCloud:
             if not (code == 0).any() and t - self.t0 > 6 * 3600:
                 break
         self.t_computed = self.t0 + self.duration
+        self._fly_fragments()
         self.done = True
+
+    def _fly_fragments(self):
+        """DART debris boulders, the stones the tractor's scan can find (core/proximity/boulders.py): N_DEBRIS
+        fragments launched slower than the local escape speed (the slow end of the same velocity law, in the same
+        45-degree cone) and flown in Bennu's polyhedron gravity until they land; they rest where they land. Their own
+        random stream: the display tracers are unchanged, and the debris is the same whatever the tracer count (a
+        re-simulation computes the past with fewer tracers)."""
+        from core.proximity.boulders import N_DEBRIS, draw_stones
+
+        rng = np.random.default_rng([self.seed, 7])
+        r_i, n_i, surf_v = self._launch
+        n = N_DEBRIS
+        vel, _ = sample_ejecta(n, 1.0, n_i, self.v_esc, rng, v_min=0.05, v_max=max(0.85 * self.v_esc, 0.06))
+        x, v = np.tile(r_i + 0.5 * n_i, (n, 1)), vel + surf_v
+        landed, land_b, t_land = np.zeros(n, bool), np.zeros((n, 3)), np.full(n, np.nan)
+        t = self.t0
+        while t - self.t0 < self.duration and not landed.all() and not self._stop:
+            h = 20.0 if t - self.t0 < 1800 else 60.0
+            fly = ~landed
+            xf, vf = x[fly], v[fly]
+            k1v = self._accel(t, xf)
+            k2v = self._accel(t + h / 2, xf + h / 2 * vf)
+            k3v = self._accel(t + h / 2, xf + h / 2 * (vf + h / 2 * k1v))
+            k4v = self._accel(t + h, xf + h * (vf + h / 2 * k2v))
+            x[fly] = xf + h * vf + h * h / 6 * (k1v + k2v + k3v)
+            v[fly] = vf + h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
+            t += h
+            Xb = x[fly] @ bennu_attitude(t)
+            down = (np.einsum("ij,ij->i", x[fly], v[fly]) < 0.0) & (np.linalg.norm(Xb, axis=1)
+                                                                   < surface_radius(self.R_map, Xb))
+            idx = np.where(fly)[0][down]
+            landed[idx], land_b[idx], t_land[idx] = True, Xb[down], t
+        stones = draw_stones(rng, n, "debris")
+        self.fragments = [dict(land_b=land_b[k], t_land=float(t_land[k]), v_launch=float(np.linalg.norm(vel[k])),
+                               **stones[k]) for k in range(n) if landed[k]]
 
     def stop(self):
         self._stop = True

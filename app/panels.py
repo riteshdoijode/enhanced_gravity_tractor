@@ -151,7 +151,10 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.objective.addItem("Fastest arrival", "fastest")
         self.objective.addItem("Most fuel-efficient (≤ 6 yr)", "efficient")
         self.boulder = ParamSlider("Boulder collected", 0, 60, d.boulder_mass_kg / 1e3, "t", decimals=0,
-                                   tooltip="Enhanced gravity tractor: mass picked up from Bennu's surface")
+                                   tooltip="Enhanced gravity tractor: the boulder mass the launch and the tow are planned\n"
+                                           "for. At Bennu the tractor's LIDAR scan finds the real stones; the one\n"
+                                           "closest to this mass is recommended, and the tow uses the mass of the stone\n"
+                                           "you pick. 0 t: a classic gravity tractor (no scan, no boulder)")
         self.hover = ParamSlider("Hover distance", 1.5, 4.0, d.hover_factor, "× radius", decimals=2)
         self.launch_tractor = QtWidgets.QPushButton("🚀  Launch gravity tractor")
         self.launch_tractor.setStyleSheet("font-weight: 700; padding: 6px;")
@@ -164,14 +167,28 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.tractor_status.setMargin(5)
         self.tractor_status.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.set_tractor_status("grey", "Launches in a live run, after a DART succeeds.")
+        # the stones the tractor's scan found at Bennu, and the choice (set_stones; the run pauses for it)
+        self.stones_label = QtWidgets.QLabel("Stones found by the scan")
+        self.stones_label.setStyleSheet("font-weight: 700;")
+        self.stones = QtWidgets.QListWidget()
+        self.stones.setMinimumHeight(130)
+        self.stones.setToolTip("Found by the tractor's LIDAR scan: size and mass are estimates (the real mass shows\n"
+                               "when the arm lifts the stone). ★ recommended: closest to the planned boulder mass.\n"
+                               "Greyed out: the arm cannot pick it up (the reason is in its tooltip).")
+        self.descend = QtWidgets.QPushButton("⬇  Descend to this stone")
+        self.descend.setStyleSheet("font-weight: 700; padding: 6px;")
+        self.descend.setEnabled(False)
+        self._stones_key = None
         self.release = QtWidgets.QPushButton("⤒  Release the boulder and end the tow")
         self.release.setToolTip("End of the tow: the tractor lets the boulder go where it is, climbs to 50 km and leaves\n"
                                 "Bennu; Bennu is then flown on with the full force model. Available while the tractor\n"
                                 "holds its station (towing or parked). Parked, the tractor keeps its boulder until you\n"
                                 "press this; the tow ends by itself only half a year before the 2135 flyby.")
         for w in (self.thrust, self.objective, self.boulder, self.hover, self.tractor_status,
-                  self.launch_tractor, self.release):
+                  self.launch_tractor, self.stones_label, self.stones, self.descend, self.release):
             trl.addWidget(w)
+        for w in (self.stones_label, self.stones, self.descend):
+            w.setVisible(False)
         lay.addWidget(box)
 
         box, ll = section("Live run")
@@ -268,6 +285,7 @@ class ControlsPanel(QtWidgets.QScrollArea):
         self.launch_tractor.setEnabled(tractor_ready)
         if not live:
             self.release.setEnabled(False)
+            self.set_stones(None)
         self.slider.setEnabled(not live)
         self.jump.setEnabled(not live)
         self.launch_after.setEnabled(not live)  # (a live run's next DARTs launch from the mission clock)
@@ -283,6 +301,60 @@ class ControlsPanel(QtWidgets.QScrollArea):
         q = QtCore.QDate.fromString(t_to_utc_str(t)[:10], "yyyy-MM-dd")
         if q != self.launch_after.date():
             self.launch_after.setDate(q)  # (dateChanged: paramsChanged, the plan is redone)
+
+    def set_stones(self, pr):
+        """The stones from the tractor's scan (pr: the proximity snapshot, None to clear). The list is rebuilt only
+        when the stones or their estimates change; the current selection is kept, else the recommended one."""
+        stones = (pr or {}).get("stones") or []
+        scan = (pr or {}).get("scan") or {}
+        show = bool(stones) or bool(scan)
+        for w in (self.stones_label, self.stones, self.descend):
+            w.setVisible(show)
+        if not show:
+            self.stones.blockSignals(True)  # (removing the rows would move the selection through them)
+            self.stones.clear()
+            self.stones.blockSignals(False)
+            self._stones_key = None
+            return
+        rec, chosen = scan.get("recommended"), pr.get("chosen")
+        key = (tuple(st["key"] for st in stones), rec, chosen, bool(scan.get("complete")))
+        awaiting = bool(pr.get("awaiting_choice"))
+        if key != self._stones_key:
+            self._stones_key = key
+            keep = self.selected_stone()
+            self.stones.blockSignals(True)
+            self.stones.clear()
+            order = sorted(stones, key=lambda st: st["t_found"])
+            for st in order:
+                n = st["index"]
+                mark = "★ " if st["key"] == rec else ("✓ " if st["key"] == chosen else "")
+                where = "DART debris" if st["kind"] == "debris" else st["name"]
+                text = (f"{mark}#{n} {where} · {st['d_est']:.1f} m · ≈ {st['mass_est'] / 1e3:.0f} ± "
+                        f"{st['mass_sigma'] / 1e3:.0f} t · slope {st['slope']:.0f}° · {st['lat']:+.0f}° {st['lon']:.0f}°E")
+                item = QtWidgets.QListWidgetItem(text)
+                item.setData(QtCore.Qt.UserRole, st["key"])
+                tip = (f"{st['name']}: {st['d_est']:.2f} m across (volume-equivalent), {st['mass_est'] / 1e3:.1f} ± "
+                       f"{st['mass_sigma'] / 1e3:.1f} t estimated, local slope {st['slope']:.0f}°, surface gravity "
+                       f"{st['g'] * 1e6:.0f} µm/s²")
+                if not st["feasible"]:
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemIsEnabled & ~QtCore.Qt.ItemIsSelectable)
+                    tip += f"\nCannot be picked up: {st['why']}"
+                item.setToolTip(tip)
+                self.stones.addItem(item)
+            want = keep if keep is not None else (chosen or rec)
+            for i in range(self.stones.count()):
+                if self.stones.item(i).data(QtCore.Qt.UserRole) == want:
+                    self.stones.setCurrentRow(i)
+            self.stones.blockSignals(False)
+            label = ("Stones found by the scan — choose one" if awaiting else
+                     "Stones found so far (scanning…)" if not scan.get("complete") else "Stones found by the scan")
+            self.stones_label.setText(label)
+        self.stones.setEnabled(awaiting or not scan.get("complete"))
+        self.descend.setEnabled(awaiting and self.selected_stone() is not None)
+
+    def selected_stone(self):
+        item = self.stones.currentItem()
+        return None if item is None else item.data(QtCore.Qt.UserRole)
 
     def set_release_ready(self, on):
         """The release button follows the mission state (set on every snapshot): the tractor holds at Bennu and
@@ -558,6 +630,7 @@ PROX_TEXT = {"approach": "approaching Bennu", "standoff": "stand-off: waiting fo
              "capture": "capturing the boulder", "ascent": "ascending with the boulder",
              "transfer": "moving to the tractor station", "station": "on station (towing)",
              "parked": "parked 5 km out (tow off)", "release": "releasing the boulder (end of the tow)",
+             "scan": "LIDAR scan of Bennu for boulders", "choose": "scan complete: choose a stone",
              "depart": "departing: climbing away from Bennu", "departed": "left Bennu (tow over)"}
 LEVEL_COLOR = {"info": "#c3c2b7", "warn": WARN, "good": GOOD, "bad": CRITICAL}
 

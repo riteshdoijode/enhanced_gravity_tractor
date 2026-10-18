@@ -505,6 +505,36 @@ You wanted to share the project with a friend on a Windows PC so they can study 
   on (22 papers; 20 had their details checked online, and the entries that could not be confirmed are marked).
 - **Checked.** A clone of the committed tree contains no absolute paths from this machine.
 
+### The boulder "vanished" at high speed; the scan for boulders (your report and request, October 18)
+
+Checkpoint commit "Checkpoint before the boulder scan (2026-10-18)", tag `checkpoint-2026-10-18-scan`.
+- **The bug.** After the capture and ascent at 1 min/s–1 h/s, switching to 1 month/s blanked the views for a
+  moment, and then the boulder was gone and the Bennu view no longer showed the tractor. The session logs showed
+  the cause: the mission released the boulder by itself 60 days after the trim was reached. Your DARTs had
+  overshot the aim (for example 566× with the hand-set 9,690 kg impactor), so the trim was reached on arrival;
+  at 1 month/s the 60 days took 2 s, the tractor climbed away, and the Bennu view framed Bennu alone.
+  - **Fix (your choice):** the tow ends only on ⤒ Release, or at the latest half a year before the 2135 flyby.
+    Parked, the tractor keeps its boulder (towing again if the flyby drifts).
+  - With nothing to tow, the trim took a direction from rounding noise and parked the tractor 180° around Bennu
+    (out of the view): it now parks straight out from its station. The Bennu view re-frames on "parked".
+- **New: the tractor scans Bennu and you choose the stone.**
+  - On arrival the tractor holds 2 km out on the sunlit side while Bennu turns once (4.3 h). A green fan of LIDAR
+    shots sweeps the surface, the mapped part turns green, and the stones it finds appear numbered with their
+    estimated size and mass.
+  - The stones: DART debris (six fragments flown from the crater slower than the escape speed until they land)
+    and one native boulder at each OSIRIS-REx candidate site (Nightingale, Kingfisher, Osprey, Sandpiper). Sizes
+    follow measured size distributions (Burke et al. 2021 for Bennu's sites, Jewitt et al. 2023 for the DART
+    boulders). The mass is an estimate ± σ: the true density is unknown until the arm lifts the stone.
+  - Feasible stones: 2–4 m (the robotic boulder capture design range), slope ≤ 20°, liftable. ★ recommended: the
+    one closest to the "Boulder collected" mass, which is now the planning mass.
+  - When the scan ends the clock pauses. Pick a stone in the Tractor box and press **⬇ Descend to this stone**.
+    The capture then runs at that stone's own site (terrain ray-cast on the shape model; Nightingale keeps its 5
+    cm model), and the tow uses its real mass. A re-simulation replays your choice.
+  - Slow motion (your speeds): 5 min/s for the scan, the choice, the move, the hover, the descent and the ascent;
+    1 min/s while the arm works; then back to your speed.
+- New tests: tests/test_boulder_scan.py (6). Updated: test_trim_hold, test_step5_prox. References 23–27 added to
+  [references.md](references.md).
+
 ---
 
 ## 3. Key results
@@ -629,7 +659,8 @@ You wanted to share the project with a friend on a Windows PC so they can study 
 | [tests/test_truth.py](tests/test_truth.py) | 2 |
 | [tests/test_dart_windows.py](tests/test_dart_windows.py) | 3 |
 | [tests/test_display_interp.py](tests/test_display_interp.py) | 4 |
-| [tests/test_trim_hold.py](tests/test_trim_hold.py) | 2 |
+| [tests/test_trim_hold.py](tests/test_trim_hold.py) | 3 |
+| [tests/test_boulder_scan.py](tests/test_boulder_scan.py) | 6 |
 | [tests/test_release.py](tests/test_release.py) | 3 |
 | [tests/test_tractor_window.py](tests/test_tractor_window.py) | 3 |
 | [tests/test_earliest_launch.py](tests/test_earliest_launch.py) | 7 |

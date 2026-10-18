@@ -185,6 +185,14 @@ the same window; if the window is over, a dialog lists the windows still ahead a
   capture, tow with the trim law to the DART aim point. ☀ Solar storm; MPC/LQR. At the hand-over from the
   escape spiral its guidance starts from the ground's optimized flight plan, the one the status strip quoted
   ("Flight plan: the ground profile"), and refines it from the actual state.
+- **Choosing the stone**: at Bennu the tractor first scans the surface from 2 km for one Bennu day. The Bennu view
+  shows the green fan of laser shots, the part mapped so far (green) and the stones found, numbered with their
+  estimated size and mass (★ recommended, grey = cannot be picked up). When the scan ends the clock pauses and the
+  Tractor box lists the stones (DART debris and the native boulders at the four candidate sample sites); pick one
+  and press **⬇ Descend to this stone**. A stone selected in the list is highlighted in the Bennu view.
+- **Slow motion at the surface** (the slow-motion checkbox, labelled by the banner): 5 min/s for the scan, the
+  choice, the move over the stone, the hover, the descent and the ascent; 1 min/s while the arm captures and stows
+  the boulder; then the run returns to your own speed.
 - **End of the tow**: **⤒ Release the boulder and end the tow** (enabled while the tractor holds its station,
   towing or parked) lets the boulder go where the craft is. The boulder stays there as a marker and the
   spacecraft is 10 t again. The craft holds 30 minutes, climbs radially to 50 km (`depart`), burns 0.5 m/s and
@@ -355,7 +363,9 @@ the hand-over the tractor flies, in the Bennu-centered frame (all on its navigat
 |---|---|---|
 | approach | to a hold point | ZEM/ZEV guidance with Bennu's gravity (Guo, Hawkins & Wie 2013) |
 | stand-off | hold 10 km out, sunlit side, off the impactor's path, until the impact | LQR; the EKF carries β as a state and measures it from Bennu's velocity jump |
-| survey | hover 780 m above the capture site, co-rotating with Bennu (6 h) | body-frame LQR/MPC; lift-off thrust check |
+| scan | hold 2 km out on the sunlit side while Bennu turns once (4.3 h); a fan of LIDAR shots maps the surface and finds the stones | inertial LQR/MPC hold; ray casts on the shape model (below) |
+| choose | hold there until a stone is chosen (the app pauses the clock; headless runs take the recommended stone) | inertial hold |
+| survey | hover 780 m above the chosen stone, co-rotating with Bennu (6 h) | body-frame LQR/MPC; lift-off thrust check |
 | descent | down the site's vertical, min-jerk profile, peak 15 cm/s | linearized rotating-frame dynamics (Coriolis + centrifugal + polyhedron gravity gradient); MPC glide-slope cone 60° |
 | capture | arm grasps and lifts a 20 t boulder | MuJoCo (below) |
 | ascent | climb to 200 m with spacecraft + boulder | body frame |
@@ -375,16 +385,44 @@ the hand-over the tractor flies, in the Bennu-centered frame (all on its navigat
   global model, or the 5 cm Nightingale model near the site; its Jacobian is −nᵀ/(nᵀb). Beyond 7 km the
   range comes from Bennu's apparent size. State: position, velocity, unmodeled acceleration
   (Gauss-Markov) and β.
+- **Scan for boulders and the choice of stone** (core/proximity/boulders.py, added 2026-10-18):
+  - *Stones*: one boulder at each of the four OSIRIS-REx candidate sample sites, at the published coordinates
+    (Nightingale 56°N 43°E, Kingfisher 11°N 56°E, Osprey 11°N 88°E, Sandpiper 47°S 322°E), plus the **DART
+    debris**: six fragments launched from the crater slower than the local escape speed (the slow end of the
+    ejecta velocity law, 45° cone) and flown in the polyhedron gravity until they land, where they rest. They
+    have their own random stream, so a re-simulation (fewer display tracers) gets the same stones in the same
+    places.
+  - *Sizes*: volume-equivalent diameters 1.9–4.4 m from power-law size-frequency distributions: cumulative
+    slope −2.65 for the native boulders (the middle of the −3.0 … −2.3 measured at the four sites, Burke et al.
+    2021) and the differential index −3.9 of the boulders the DART impact ejected from Dimorphos (Jewitt et al.
+    2023). The team assumes 2,000 kg/m³; each boulder's true density differs by 15 % (1σ, illustrative), so the
+    scan reports mass ± σ and the real mass shows only when the arm lifts it.
+  - *Scan*: each 60 s control tick casts a north–south fan of 120 laser shots on the shape model; hits mark a
+    2° × 2° latitude/longitude map (about 92 % of the surface after one Bennu day) and a stone is found once its
+    cell is hit. The fan stands for the real instrument: each axis is measured to s/√6, with s the shot spacing
+    of an OLA-class altimeter at 100 Hz over the mapped area (OLA ranges from beyond 7 km at 100 Hz, Lauretta et
+    al. 2017; Daly et al. 2017), about 0.27 m.
+  - *Feasible*: estimated diameter 2–4 m (the robotic boulder capture design range, "typically 2–4 m", Gates et
+    al. 2015), local slope ≤ 20° (the rock must lie still while the claws close: MuJoCo captures failed on some
+    23–25° sites), thrust ≥ 1.3 × the weight of the craft plus the upper (2σ) mass estimate.
+    *Recommended* (★): the feasible stone whose estimated mass is closest to the planning mass ("Boulder
+    collected").
+  - *Capture anywhere*: the site frame is built under the chosen stone (x east, y north, z up = −effective gravity,
+    polyhedron gravity + centrifugal at the current spin) with a 20 m × 20 m heightfield, ray-cast at 0.25 m on
+    the shape model (the 5 cm Nightingale model there). The rock lies on the local slope (tilted with the
+    terrain's mean plane), not level on one edge. The tow then uses the stone's real mass.
 - **Capture** (MuJoCo 3.16): site frame from the real Nightingale terrain (heightfield from the
-  OSIRIS-REx 5 cm model, lat 56.05°, lon 43.15°, at the flattest 3 m spot). Gravity is the effective
-  gravity there (7.3 × 10⁻⁵ m/s²), plus the Coriolis force on every body.
+  OSIRIS-REx 5 cm model, lat 56.05°, lon 43.15°, at the flattest 3 m spot), or the chosen stone's site.
+  Gravity is the effective gravity there (7.3 × 10⁻⁵ m/s² at Nightingale), plus the Coriolis force on every
+  body.
   - The bus is free-floating. Its thrusters (limited to the tractor thrust) and control-moment gyros hold
     position and attitude with quaternion PD.
   - Arm: 4 joints (3 m + 3 m + 0.6 m) and 3 claws, with computed-torque control
     τ = M(q)(q̈_d + K_d ė + K_p e) + C q̇ + G. M and the bias come from MuJoCo. After the grip the
     controller switches to a merged-mass model (boulder rigid in the palm).
   - Microspine grip: adhesion while pressing, then a palm–boulder weld once the palm touches.
-  - The boulder is a synthetic convex rock of 2,000 kg/m³ (3.6 × 2.7 × 2.1 m for 20 t).
+  - The boulder is a synthetic convex rock (3.6 × 2.7 × 2.1 m for 20 t at 2,000 kg/m³; the chosen stone's own
+    shape, size and density in a live run).
   - Sequence: deploy → reach → grip → lift (bus thrusters) → stow. Mass properties then merge with the
     parallel-axis theorem.
 - **Interactions**:
@@ -895,6 +933,17 @@ order, and the Step 6 test uses that to launch the tractor first.
 | Recommended 2030 DART, β 1.7 (a natural shortfall) | 42 % of the target, short; DART #2 recommended for the Feb 2031 pass (1.6 t at 10.8 km/s with the measured β), launched from the panel |
 | Undersized DART (30 % of the recommendation) | short (34 %); DART #2 (758 kg, 2031 pass) brings the flyby to 1.21 LD |
 | Full-model sizing of the 2030 DART | 142 kg instead of 191 kg linear; delivers 100.3 % of the target (4 propagations, 93 s) |
+
+## Findings and fixes (2026-10-18)
+
+- **"The boulder disappears at 1 month/s"** was not a display bug: the mission released the boulder by itself 60
+  days after the trim was reached. With a DART that overshot the aim point that was right on arrival, so at
+  1 month/s the 60 days passed in 2 s, the tractor left, and the Bennu view went back to Bennu alone. The tow now
+  ends only on ⤒ Release (at the latest half a year before the 2135 flyby); parked, the tractor keeps its boulder
+  (tests/test_trim_hold.py). Two related fixes: with nothing to tow, the trim gave a direction from rounding
+  noise and the tractor parked 180° around Bennu (now it parks straight out from its station), and the Bennu
+  view now re-frames when the tractor parks.
+- **New: the scan for boulders and the choice of stone** (Step 5 above, tests/test_boulder_scan.py).
 
 ## Findings and fixes (2026-10-17)
 

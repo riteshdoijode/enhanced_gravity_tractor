@@ -164,6 +164,36 @@ class SceneBase:
             self._a[key].SetVisibility(True)
         self.update_line(key, pts, color=color, line_width=width, opacity=opacity)
 
+    def _segments(self, key, pairs, color, width=1.5, opacity=0.85):
+        """Separate line segments (one actor), e.g. the fan of laser shots."""
+        if not pairs:
+            self.hide(key)
+            return
+        pts = np.array([p for pair in pairs for p in pair], float)
+        n = len(pairs)
+        poly = pv.PolyData(pts, lines=np.column_stack([np.full(n, 2), 2 * np.arange(n), 2 * np.arange(n) + 1]).ravel())
+        if key in self._d:
+            self._d[key].copy_from(poly)
+            self._a[key].SetVisibility(True)
+        else:
+            self._d[key] = poly
+            self._a[key] = self.pl.add_mesh(poly, color=color, line_width=width, opacity=opacity, lighting=False,
+                                            name=key, render=False)
+
+    def _points(self, key, pts, color, size):
+        """Screen-space markers at several points (one actor)."""
+        if pts is None or not len(pts):
+            self.hide(key)
+            return
+        poly = pv.PolyData(np.asarray(pts, float))
+        if key in self._d:
+            self._d[key].copy_from(poly)
+            self._a[key].SetVisibility(True)
+        else:
+            self._d[key] = poly
+            self._a[key] = self.pl.add_points(poly, color=color, point_size=size, render_points_as_spheres=True,
+                                              ambient=1.0, name=key, render=False)
+
     def sun_light(self, direction, intensity=1.2):
         """Directional light shining along -direction (direction points from the scene toward the Sun); one
         light per scene, moved in place."""

@@ -63,12 +63,15 @@ SLOWMO_RANGE_DART = (5.0, "DART: the last 1,000 km to Bennu")  # ~15 s of wall t
 SLOWMO_RANGE_TRACTOR = (600.0, "Tractor: the last 1,000 km to Bennu")  # 10 min/s until the proximity operations
 SLOWMO_IMPACT = ((40.0, 2.0, "Impact: the flash and the ejecta curtain"),
                  (1200.0, 60.0, "Impact: the ejecta cone spreading"))
-SLOWMO_DESCENT = ((150.0, 90.0, "Tractor: final descent to the boulder"),
-                  (np.inf, 300.0, "Tractor: descent toward the boulder"))
 SLOWMO_EARTH_ALT = _EARTH_ALT  # Bennu within 1,000 km of Earth's surface on an impact course: 5 s/s (~80 s)
 SLOWMO_EARTH = _SLOWMO_EARTH[0]
-SLOWMO_CAPTURE = 15.0  # s/s while the arm grabs and stows the boulder (~11 min of mission time)
-SLOWMO_ASCENT = (900.0, 60.0)  # the first 15 minutes of the ascent with the boulder
+# The tractor at the surface (user's choice, 2026-10-18): one speed for the scan, the choice, the move over the chosen
+# stone, the hover, the descent and the whole ascent; slower only while the arm works; then the user's speed again.
+SLOWMO_SURFACE = 300.0  # 5 min/s
+SLOWMO_ARM = 60.0  # 1 min/s while the arm grabs and stows the boulder (~11 min of mission time)
+SURFACE_TEXT = {"scan": "Tractor: LIDAR scan of Bennu for boulders", "choose": "Tractor: scan complete, choose a stone",
+                "approach": "Tractor: moving over the chosen stone", "survey": "Tractor: hovering over the chosen stone",
+                "descent": "Tractor: descent to the boulder", "ascent": "Tractor: lifting off with the boulder"}
 
 
 @dataclass
@@ -145,6 +148,8 @@ class LiveMission:
         self.grav_helio = NBody(eph, "sun", HELIO_BODIES)
         self.grav_geo = NBody(eph, "earth", GEO_BODIES)
         self.prox_controller = "MPC"
+        self.boulder_choice = "recommended"  # the stone to pick up after the scan: "ask" (the app) or the recommended one
+        self._boulder_pick = None  # a choice made before the tractor reached Bennu (re-simulation)
         self.ejecta = None
         self.t_impact = np.nan  # last DART impact
         from core.dynamics.asteroid import reset_spin
@@ -332,6 +337,20 @@ class LiveMission:
             pr.controller_kind = kind
             self.log(self.t, "tractor", f"Proximity controller → {kind}")
 
+    def select_boulder(self, key):
+        """The stone the tractor picks up (after its scan, core/proximity/ops.py select). True if taken (or kept
+        for when the scan ends)."""
+        pr = self.tractor.prox
+        if pr is None:
+            self._boulder_pick = key
+            return True
+        return pr.select(key)
+
+    def awaiting_boulder(self):
+        """The scan has ended and the run waits for the choice of stone."""
+        pr = self.tractor.prox
+        return pr is not None and pr.awaiting_choice()
+
     def set_tractor_thrust(self, thrust_n):
         if abs(thrust_n - self.tractor.thrust) > 1e-9:
             if self.tractor.phase != "waiting":
@@ -473,17 +492,16 @@ class LiveMission:
                 if -60.0 <= since < t_s:  # (the DART's last step may end a moment past the mission clock)
                     return warp, what
         pr = self.tractor.prox
-        if pr is not None:
-            if pr.phase == "descent":
-                alt = pr.hist["alt"][-1] if pr.hist["alt"] else np.inf
-                for a, warp, what in SLOWMO_DESCENT:
-                    if alt <= a:
-                        return warp, what
+        if pr is not None and pr.do_scan or pr is not None and pr.phase in ("capture", "ascent"):
             if pr.phase == "capture":
                 stage = getattr(pr.capture, "stage", "")
-                return SLOWMO_CAPTURE, f"Tractor: capturing the boulder ({stage})"
-            if pr.phase == "ascent" and pr.t - pr.phase_t0 < SLOWMO_ASCENT[0]:
-                return SLOWMO_ASCENT[1], "Tractor: lifting off with the boulder"
+                return SLOWMO_ARM, f"Tractor: the arm captures the boulder ({stage})"
+            surface = pr.phase in ("scan", "choose", "descent", "ascent") or (
+                pr.phase == "survey" and pr.waiting_since is None) or (
+                pr.phase == "approach" and pr.chosen is not None and not pr.has_boulder
+                and not pr.phase_done.get("capture"))
+            if surface:
+                return SLOWMO_SURFACE, SURFACE_TEXT[pr.phase]
         return None
 
     def advance(self, t_target, max_chunk=None, budget=None, stop=None):

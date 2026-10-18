@@ -9,9 +9,10 @@ physics itself. If it cannot keep up (a long proximity phase at a high warp, or 
 integrated), the clock goes only as far as the physics has computed: the snapshot says so ("behind", or
 "busy" while it waits) and the UI shows "computing" / "recalculating" instead of guessing.
 
-Commands: pause/resume, warp, launch a DART or the tractor, solar storm, proximity controller, release the boulder
-(end of the tow), skip to the next event, run to the end. Launches, storms and the release are recorded with
-their mission times.
+Commands: pause/resume, warp, launch a DART or the tractor, solar storm, proximity controller, choose the stone the
+tractor's scan found (select_boulder), release the boulder (end of the tow), skip to the next event, run to the end.
+Launches, storms, the stone and the release are recorded with their mission times. Like a DART verdict, the end of
+the tractor's scan is a decision point: the clock pauses until a stone is chosen.
 
 Re-simulation ("resim", params, dart_plan, t_start, t_back): when a parameter changes during a run, the whole
 mission is flown again from its start with the new parameters, replaying the recorded commands at their times
@@ -57,6 +58,7 @@ class LiveRunner:
         self._results_seen = 0
         self._achieved = 0.0
         self._behind = 0
+        self._choice_paused = False
 
     # ------------------------------------------------------------------ commands
     def command(self, name, args):
@@ -98,6 +100,10 @@ class LiveRunner:
             state = self._state(m)
             if m.launch_tractor(plan):
                 self._record("launch_tractor", plan, **state)
+                self.running = True
+        elif name == "select_boulder":  # the stone the tractor picks up (after its scan)
+            if m.select_boulder(args[0]):
+                self._record("select_boulder", args[0])
                 self.running = True
         elif name == "release":  # end of the tow: the boulder is let go, the tractor leaves Bennu
             if m.end_tow():
@@ -150,6 +156,7 @@ class LiveRunner:
         self.mission = m
         self.record = []
         self.skip_to = None
+        self._choice_paused = False
         self._results_seen = 0
         self._curve_sent = -1
         self.replay = {"queue": queue, "commands": commands, "t_back": t_back, "t0": float(t_start),
@@ -210,6 +217,9 @@ class LiveRunner:
         elif name == "controller":
             m.set_prox_controller(c["arg"])
             self._record("controller", c["arg"])
+        elif name == "select_boulder":  # the same stone (applied when the new run's scan ends; if that run's
+            if m.select_boulder(c["arg"]):  # stones differ, the recommended one is taken and logged)
+                self._record("select_boulder", c["arg"])
         elif name == "release":
             if m.end_tow():
                 self._record("release", None)
@@ -304,6 +314,10 @@ class LiveRunner:
                 self._achieved, self._behind = 0.0, 0
             if len(m.dart_results) > self._results_seen:  # a DART verdict is a decision point: pause the clock
                 self._results_seen = len(m.dart_results)
+                self.running = False
+                self.skip_to = None
+            if m.awaiting_boulder() and not self._choice_paused:  # so is the end of the tractor's scan
+                self._choice_paused = True
                 self.running = False
                 self.skip_to = None
             s = snapshot(m)
@@ -406,6 +420,7 @@ def _serve(cmd_q, snap_q, pending, eph, planner, env, fullmodel):
             def factory(p, t0, seed=seed, controller=controller):
                 m = LiveMission(eph, planner.nom, planner, p, t0, seed=seed)
                 m.prox_controller = controller
+                m.boulder_choice = "ask"  # the user picks the stone
                 m._prox_env = env
                 m.fullmodel = pool["fm"]
                 return m

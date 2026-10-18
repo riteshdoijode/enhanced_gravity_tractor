@@ -163,8 +163,9 @@ def planner():
 
 
 def test_proximity_timeline_in_live_mission(planner):
-    """Hand-over 30 km out -> approach -> survey -> MPC descent in the glide-slope cone -> MuJoCo capture ->
-    ascent -> transfer -> tractor station, all on the EKF estimate in the full model."""
+    """Hand-over 30 km out -> approach -> LIDAR scan for boulders -> the recommended stone (headless run) ->
+    survey -> MPC descent in the glide-slope cone -> MuJoCo capture -> ascent -> transfer -> tractor station, all
+    on the EKF estimate in the full model."""
     import time
 
     from core.dynamics.asteroid import bennu_attitude
@@ -192,8 +193,8 @@ def test_proximity_timeline_in_live_mission(planner):
     assert time.time() - wall < 240
     assert pr.phase == "station" and pr.has_boulder and pr.capture_result["success"]
     texts = [e.text for e in m.events]
-    order = ["approach to the survey point", "Surveying", "Descent", "Capture: hovering", "Boulder captured",
-             "Ascent", "Transfer", "On station"]
+    order = ["approach to the scan point", "LIDAR scan", "Scan complete", "approach to the survey point", "Surveying",
+             "Descent", "Capture: hovering", "Boulder captured", "Ascent", "Transfer", "On station"]
     idx = [next(i for i, s in enumerate(texts) if key in s) for key in order]
     assert idx == sorted(idx)
     assert np.linalg.norm(pr.x[:3] - pr.d_station * pr.e_station) < 1.0
@@ -207,5 +208,5 @@ def test_proximity_timeline_in_live_mission(planner):
     for t, rho in pr.trail:
         if t_desc + 600 < t < t_cap:
             rel = bennu_attitude(t).T @ rho - pr.site_body
-            ang.append(np.degrees(np.arccos(rel @ pr.env.site_up / np.linalg.norm(rel))))
+            ang.append(np.degrees(np.arccos(rel @ pr.site.up / np.linalg.norm(rel))))
     assert len(ang) > 50 and max(ang) < np.degrees(GLIDESLOPE)

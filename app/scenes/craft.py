@@ -33,6 +33,7 @@ class CraftScene(SceneBase):
         self.kind = "dart"  # which craft is shown: "dart" or "tractor"
         self.follow = True  # camera follows the craft until the user moves it
         self._geom_actors = {}
+        self._boulder_key = None
         self.build()
         try:
             self.pl.iren.add_observer("StartInteractionEvent", lambda *a: setattr(self, "follow", False))
@@ -208,6 +209,7 @@ class CraftScene(SceneBase):
             for a, _ in self._osiris:
                 a.SetVisibility(False)
             self.clear_live_geoms()
+            self.hide("live_beams")
         else:
             for a in self._dart:
                 a.SetVisibility(False)
@@ -217,6 +219,7 @@ class CraftScene(SceneBase):
                 self._prox_geoms(prox)
             else:
                 self.clear_live_geoms()
+                self.hide("live_beams")
                 R = attitude(forward, s_dir, "y")
                 for a, node in self._osiris:
                     import pyvista as pv
@@ -237,6 +240,12 @@ class CraftScene(SceneBase):
 
     def _prox_geoms(self, pr):
         rho = np.asarray(pr["rho"], float)
+        if pr.get("boulder_key") != self._boulder_key:  # a stone was chosen: its rock replaces the plan's
+            self._boulder_key = pr.get("boulder_key")
+            self.clear_live_geoms()
+        beams = (pr.get("scan") or {}).get("beams") or []
+        self._segments("live_beams", [(np.zeros(3), np.asarray(b, float) - rho) for _, b in beams], "#3cff6e",
+                       width=1.2, opacity=0.7)  # the scan's laser shots, from the craft
         names = set()
         for name, gtype, size, rgba, p, R in pr["geoms"]:
             names.add(name)

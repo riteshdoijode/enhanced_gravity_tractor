@@ -344,7 +344,7 @@ def fig_prox_ops(eph):
     ax.plot(th, H["alt"], color=ps.SERIES[0])
     ax.set_yscale("log")
     ax.set_ylabel("Altitude above the surface [m]")
-    ax.set_title("Approach, survey, descent, capture, ascent, station")
+    ax.set_title("Approach, scan, survey, descent, capture, ascent, station")
     _stage_bands(ax, th, list(H["phase"]))
     ax.set_ylim(top=ax.get_ylim()[1] * 8)
     ax = axs[0, 1]
@@ -363,9 +363,9 @@ def fig_prox_ops(eph):
     for t, rho in pr.trail:
         if t_desc <= t <= t_cap:
             rel = bennu_attitude(t).T @ rho - pr.site_body
-            h = rel @ pr.env.site_up
+            h = rel @ pr.site.up
             hh.append(h)
-            lat.append(np.linalg.norm(rel - h * pr.env.site_up))
+            lat.append(np.linalg.norm(rel - h * pr.site.up))
     hh, lat = np.array(hh), np.array(lat)
     hg = np.geomspace(max(hh.min(), 1.0), hh.max(), 50)
     ax.fill_between(hg, hg * np.tan(GLIDESLOPE), 1e4, color=ps.GRID, alpha=0.6, lw=0)

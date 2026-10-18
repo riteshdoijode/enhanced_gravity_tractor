@@ -2,7 +2,9 @@
 
 Planning: the recommended point of contact of the selected DART, rotating with Bennu. Live: the incoming DART
 in its last minutes, the impact site and ejecta tracers, and the gravity tractor (bus, arm, boulder from the
-simulation) with its trail, thrust plume, LIDAR beam, the capture site and the tractor station.
+simulation) with its trail, thrust plume, LIDAR beam, the capture site and the tractor station. During the
+tractor's scan for boulders (core/proximity/boulders.py): the green fan of laser shots, the part of the surface
+mapped so far (green), and the stones found, numbered, with their estimated size and mass (★ recommended).
 """
 
 import numpy as np
@@ -13,6 +15,8 @@ from core.assets import bennu_display_mesh, bennu_surface_gravity, tagsite, tags
 
 DART_SHOW_RANGE = 150e3  # m: the incoming DART is drawn inside this range (its last ~13 s)
 FLASH_S = 25.0  # s: the impact flash expands and fades over this much mission time
+SCAN_GREEN = "#3cff6e"
+STONE_COLOR = "#9a8f84"
 
 
 def _cut_site(bennu):
@@ -46,6 +50,10 @@ class BennuScene(SceneBase):
         self.contact_b = None  # recommended point of contact (body frame) of the planned DART
         self._geom_actors = {}
         self._sc_pos = None
+        self._boulder_key = None
+        self._stone_actors = {}  # stone key -> actor (body-frame mesh, posed with Bennu's rotation)
+        self._cover = None  # (version, grid) of the scan's coverage shell
+        self.highlight = None  # stone selected in the list
         self.build()
 
     def build(self):
@@ -66,6 +74,7 @@ class BennuScene(SceneBase):
                                                 specular=0.05, smooth_shading=True, name="bennu", render=False)
             self._a["tagsite"] = self.pl.add_mesh(meshes["site"], color="#6e675f", ambient=0.02, diffuse=1.0,
                                                   specular=0.05, smooth_shading=True, name="tagsite", render=False)
+        self._stone_actors, self._cover, self._geom_actors = {}, None, {}
         self.marker("contact", "#ff3b6b", 12)
         self.hide("contact")
         self.labels("contact_label", ["DART aim point"], color="#ff8fa8", size=11)
@@ -119,6 +128,32 @@ class BennuScene(SceneBase):
         c.focal_point, c.up = (0.0, 0.0, 0.0), (0, 0, 1)
         self.pl.reset_camera_clipping_range()
 
+    def frame_scan(self):
+        """The tractor's scan: the camera beside the tractor, the fan of laser shots and Bennu in view."""
+        if self._sc_pos is None:
+            return
+        rho = np.asarray(self._sc_pos, float)
+        r = np.linalg.norm(rho)
+        e1 = rho / r
+        side = np.cross(e1, [0, 0, 1.0])
+        side /= max(np.linalg.norm(side), 1e-9)
+        c = self.pl.camera
+        c.position = tuple(1.2 * rho + 1.6 * r * side + 0.5 * r * np.array([0, 0, 1.0]))
+        c.focal_point, c.up = tuple(0.55 * rho), (0, 0, 1)
+        self.pl.reset_camera_clipping_range()
+
+    def set_highlight(self, key):
+        self.highlight = key
+        if self.live is not None:
+            self._update_scan(((self.live.get("tractor") or {}).get("prox")) or {})
+
+    def look_at_stone(self, key, distance=1100.0):
+        """Turn the camera to a stone the scan found (the list's selection), Bennu's center in the middle."""
+        pr = ((self.live or {}).get("tractor") or {}).get("prox") or {}
+        st = next((x for x in pr.get("stones") or [] if x["key"] == key), None)
+        if st is not None:
+            self.frame(distance, toward=self._R(self.live["t"]) @ np.asarray(st["point_b"], float))
+
     def set_banner(self, text):
         """A second line under the title (e.g. the slow-motion note)."""
         self.text("title", "Bennu (true scale)" + (f"\n{text}" if text else ""), size=9, color="#c3c2b7")
@@ -166,6 +201,10 @@ class BennuScene(SceneBase):
         self.live = None
         self.clear_live_actors()
         self._geom_actors = {}
+        self._stone_actors = {}
+        self._cover = None
+        self._boulder_key = None
+        self.highlight = None
         self._sc_pos = None
         if self.t is not None:
             self.update(self.t)
@@ -241,6 +280,12 @@ class BennuScene(SceneBase):
         pr = (self.live.get("tractor") or {}).get("prox")
         if pr is None:
             return
+        if pr.get("boulder_key") != self._boulder_key:  # a stone was chosen: its rock replaces the plan's
+            self._boulder_key = pr.get("boulder_key")
+            for name in list(self._geom_actors):
+                self.pl.remove_actor(self._geom_actors.pop(name), render=False)
+                self._a.pop(f"live_g_{name}", None)
+        self._update_scan(pr)
         names = set()
         for name, gtype, size, rgba, p, R in pr["geoms"]:
             names.add(name)
@@ -260,7 +305,7 @@ class BennuScene(SceneBase):
                 actor.SetVisibility(False)
         rho = np.asarray(pr["rho"], float)
         self._sc_pos = rho
-        self.live_marker("live_sc_marker", rho if np.linalg.norm(rho) > 2e3 else None, LIVE_COLORS["tractor"], 9)
+        self.live_marker("live_sc_marker", rho if np.linalg.norm(rho) > 1.5e3 else None, LIVE_COLORS["tractor"], 9)
         self.live_line("live_prox_trail", pr["trail"], LIVE_COLORS["tractor"], width=2.0, opacity=0.8)
         T = np.asarray(pr["thrust_vec"], float)
         if np.linalg.norm(T) > 1e-6 and pr["thrust_max"] > 0:
@@ -274,7 +319,7 @@ class BennuScene(SceneBase):
             self.live_line("live_lidar", np.array([rho, rho + b * pr["lidar"]]), "#ff3b6b", width=1.5, opacity=0.8)
         else:
             self.live_line("live_lidar", None, "#ff3b6b")
-        self.live_marker("live_site", np.asarray(pr["site"], float), "#ff5a36", 9)
+        self.live_marker("live_site", None if pr.get("site") is None else np.asarray(pr["site"], float), "#ff5a36", 9)
         leaving = pr["phase"] in ("release", "depart", "departed")  # the tow is over: no station to mark
         self.live_marker("live_station", None if leaving else np.asarray(pr["station"], float), "#3987e5", 9)
         free = pr.get("boulder_free")
@@ -283,3 +328,95 @@ class BennuScene(SceneBase):
         phase = pr["phase"] + (f" · {pr['capture_stage']}" if pr.get("capture_stage") else "")
         self._d["live_labels"] = ([f"Gravity tractor ({phase})"], "white", 11)
         self.set_label_points("live_labels", [rho + np.array([0, 0, max(8.0, 0.02 * np.linalg.norm(rho))])])
+
+    # ------------------------------------------------------------------ the tractor's scan for boulders
+    def _coverage(self, scan, R):
+        """The surface mapped so far: a shell 1.5 m above the surface, its 2 x 2 deg cells green once hit."""
+        import pyvista as pv
+
+        hits = scan.get("hits")
+        if hits is None:
+            self.hide("live_cover")
+            return
+        if self._cover is None:
+            from core.impact import radius_map, surface_radius
+
+            n_lat, n_lon = hits.shape
+            lat = np.radians(np.linspace(-90, 90, n_lat + 1))
+            lon = np.radians(np.linspace(0, 360, n_lon + 1))
+            LA, LO = np.meshgrid(lat, lon, indexing="ij")
+            U = np.stack([np.cos(LA) * np.cos(LO), np.cos(LA) * np.sin(LO), np.sin(LA)], axis=-1)
+            r = surface_radius(radius_map(), U.reshape(-1, 3)).reshape(LA.shape) + 1.5
+            X = U * r[..., None]
+            grid = pv.StructuredGrid(X[..., 0], X[..., 1], X[..., 2])
+            grid.cell_data["rgba"] = np.zeros((grid.n_cells, 4), np.uint8)
+            self._d["live_cover"] = grid
+            self._a["live_cover"] = self.pl.add_mesh(grid, scalars="rgba", rgba=True, preference="cell", lighting=False,
+                                                     name="live_cover", render=False)
+            self._cover = [-1, grid]
+        if scan.get("version") != self._cover[0]:
+            self._cover[0] = scan.get("version")
+            rgba = np.zeros((hits.size, 4), np.uint8)
+            on = hits.ravel(order="F") > 0  # (structured-grid cells: the first index runs fastest)
+            rgba[on] = (60, 255, 110, 60)
+            self._cover[1].cell_data["rgba"][:] = rgba
+            self._cover[1].Modified()
+        self._a["live_cover"].user_matrix = pose(R=R)
+        self._a["live_cover"].SetVisibility(True)
+
+    def _stone_actor(self, st):
+        import pyvista as pv
+
+        from core.proximity.boulders import _local_frame
+        from core.proximity.capture import boulder_mesh
+
+        hull = boulder_mesh(st["mass"], seed=st["seed"], aspect=st["aspect"], density=st["density"])
+        L = _local_frame(-np.asarray(st["up_b"], float))
+        v = np.asarray(hull.vertices, float)
+        v[:, 2] -= v[:, 2].min()  # resting on the ground
+        vb = np.asarray(st["point_b"], float) + v @ L.T
+        mesh = pv.PolyData.from_regular_faces(vb, np.asarray(hull.faces)).compute_normals()
+        return self.pl.add_mesh(mesh, color=STONE_COLOR, ambient=0.12, diffuse=0.9, smooth_shading=False,
+                                name=f"live_stone_{st['key']}", render=False)
+
+    def _update_scan(self, pr):
+        scan = pr.get("scan")
+        stones = pr.get("stones") or []
+        if not scan:
+            for key in ("live_beams", "live_cover", "live_stones_ok", "live_stones_no", "live_stone_sel",
+                        "live_stone_labels"):
+                self.hide(key)
+            return
+        R = self._R(self.live["t"])
+        self._segments("live_beams", scan.get("beams") or [], SCAN_GREEN, width=1.5, opacity=0.85)
+        self._coverage(scan, R)
+        chosen = pr.get("chosen")
+        for st in stones:
+            if st["key"] not in self._stone_actors:
+                self._stone_actors[st["key"]] = act = self._stone_actor(st)
+                self._a[f"live_stone_{st['key']}"] = act
+            act = self._stone_actors[st["key"]]
+            act.user_matrix = pose(R=R)
+            act.SetVisibility(st["key"] != chosen)  # the chosen stone is the capture's own boulder
+        picking = chosen is None
+        tops = {st["key"]: R @ (np.asarray(st["point_b"], float) + np.asarray(st["up_b"], float) * (st["d_est"] + 4.0))
+                for st in stones}
+        ok = [tops[st["key"]] for st in stones if st["feasible"]] if picking else []
+        no = [tops[st["key"]] for st in stones if not st["feasible"]] if picking else []
+        self._points("live_stones_ok", ok, SCAN_GREEN, 9)
+        self._points("live_stones_no", no, "#8b8f97", 7)
+        sel = self.highlight if picking else None
+        self.live_marker("live_stone_sel", tops.get(sel), "#ffb347", 14)
+        if picking and stones:
+            rec = scan.get("recommended")
+            names = []
+            for st in stones:  # (short: size and mass are in the list; ten long labels on Bennu overlap. Plain
+                big = st["key"] == self.highlight  # glyphs only: the overlay font has no star or ballot x)
+                names.append(f"#{st['index']}" + (" recommended" if st["key"] == rec else "")
+                             + ("" if st["feasible"] else " ×")
+                             + (f" {st['d_est']:.1f} m ~{st['mass_est'] / 1e3:.0f} t" if big else ""))
+            self.labels("live_stone_labels", names, color="#c9ffd6", size=11)
+            self.set_label_points("live_stone_labels", [tops[st["key"]] + 6.0 * tops[st["key"]] /
+                                                        np.linalg.norm(tops[st["key"]]) for st in stones], names)
+        else:
+            self.hide("live_stone_labels")

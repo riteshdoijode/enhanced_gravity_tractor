@@ -52,6 +52,20 @@ The **Check** column says how far each entry was checked:
 | 14 | Collins, G. S., Melosh, H. J., & Marcus, R. A. (2005). Earth Impact Effects Program: A web-based computer program for calculating the regional environmental consequences of a meteoroid impact on Earth. *Meteoritics & Planetary Science* 40(6), 817–840. doi:10.1111/j.1945-5100.2005.tb00157.x | Atmospheric entry (Eqs. 5, 8–12, 15–18), breakup altitude, pancake factor 7, transient crater (Eq. 21, 1.161 for rock and 1.365 for water). Eq. 32 (fireball) is deliberately not used: it applies only above about 15 km/s | `core/earth_impact.py`, `app/scenes/earth_impact.py`, `tests/test_earth_impact.py`, `README.md` | Web |
 | 15 | Housen, K. R., & Holsapple, K. A. (2011). Ejecta from impact craters. *Icarus* 211, 856–875. doi:10.1016/j.icarus.2010.09.017 | Ejecta-velocity scaling M(>v) ∝ v^(−3μ), μ ≈ 0.41 for porous targets, used for the illustrative ejecta cloud after the DART impact | `core/impact.py` | Web |
 
+### Boulders, the tractor's scan and the capture design range (added 2026-10-18)
+
+| # | Reference | Used for | Where | Check |
+|---|---|---|---|---|
+| 23 | Burke, K. N., DellaGiustina, D. N., Bennett, C. A., Walsh, K. J., Pajola, M., Bierhaus, E. B., Nolan, M. C., et al. (2021). Particle size-frequency distributions of the OSIRIS-REx candidate sample sites on asteroid (101955) Bennu. *Remote Sensing* 13(7), 1315. doi:10.3390/rs13071315 | Power-law slopes −3.0 ± 0.2 … −2.3 ± 0.1 at the four candidate sites; the native boulders use −2.65, the middle of that range | `core/proximity/boulders.py` | Web (abstract) |
+| 24 | Jewitt, D., Kim, Y., Li, J., & Mutchler, M. (2023). The Dimorphos boulder swarm. *The Astrophysical Journal Letters* 952, L12. doi:10.3847/2041-8213/ace1ec | Boulders ejected by the DART impact: differential size index q = −3.9 ± 1.5 (boulders > 4 m), velocity dispersion 0.30 m/s, close to the escape speed; used for the DART debris sizes (and the slow, falling-back fragments) | `core/proximity/boulders.py`, `core/impact.py` | Web (full text) |
+| 25 | Lauretta, D. S., et al. (2017). OSIRIS-REx: Sample return from asteroid (101955) Bennu. *Space Science Reviews* 212, 925–984. doi:10.1007/s11214-017-0405-1 | OLA ranges to Bennu from beyond 7 km at 100 Hz (as close as 50 m at 10 kHz): the shot rate behind the scan's size accuracy | `core/proximity/boulders.py` | Web |
+| 26 | Daly, M. G., et al. (2017). The OSIRIS-REx Laser Altimeter (OLA) investigation and instrument. *Space Science Reviews* 212, 899–924 | The laser altimeter the scan models | `core/proximity/boulders.py`, `core/proximity/sensors.py` | Web (title, journal, pages; I did not read the instrument specifications in the paper itself) |
+| 27 | Gates, M., Stich, S., McDonald, M., Muirhead, B., Mazanek, D., Abell, P., & Lopez, P. (2015). The Asteroid Redirect Mission and sustainable human exploration. *Acta Astronautica* 111, 29–36. doi:10.1016/j.actaastro.2015.01.025 | The robotic boulder capture option: a boulder "typically 2–4 m"; the stones the arm can pick up | `core/proximity/boulders.py` | Web (bibliographic details; the 2–4 m wording is from summaries of the paper and of its IAC-14 version) |
+
+Candidate sample-site coordinates (Nightingale 56°N 43°E, Kingfisher 11°N 56°E, Osprey 11°N 88°E, Sandpiper 47°S 322°E): NASA news release "NASA Mission Selects Final Four Site Candidates for Asteroid Sample Return" (2019-08-12) and J. Davis, "OSIRIS-REx Team Picks 4 Candidate Sample Sites on Asteroid Bennu", The Planetary Society (2019-08-15), https://www.planetary.org/articles/osiris-rex-4-sample-sites. Check: Web. Used in `core/proximity/boulders.py`.
+
+Illustrative, not from a source: the 15 % (1σ) spread of the boulders' true density around the assumed 2,000 kg/m³, the 20° slope limit (set from MuJoCo captures: some 23–25° sites failed as the rock rolled away from the claws), and the 1.3 : 1 : 0.75 rock shape.
+
 ### Sky, stars and the Solar System's motion through the Galaxy (display)
 
 | # | Reference | Used for | Where | Check |

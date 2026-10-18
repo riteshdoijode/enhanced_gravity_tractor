@@ -119,6 +119,7 @@ class LiveSimThread(QtCore.QThread):
         def factory(p, t0):
             m = LiveMission(self.eph, self.planner.nom, self.planner, p, t0, seed=seed)
             m.prox_controller = controller
+            m.boulder_choice = "ask"  # the user picks the stone
             return m
 
         self.runner = LiveRunner(factory(params, t_start), warp, factory=factory)
