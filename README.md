@@ -959,19 +959,3 @@ tests/     validation suite
 data/      cached ephemerides + SBDB record (generated)
 assets/    processed models (raw downloads in assets/raw/)
 ```
-
-## Progress
-
-- [x] Step 1 — setup, real data, 3D models, app skeleton
-- [x] Step 2 — core physics library + validation
-- [x] Step 3 — instant mission planner wired to sliders
-- [x] Step 4 — live run: low-thrust guidance, solar-storm events, fuel tracking, navigation filter
-- [x] Step 5 — Bennu proximity ops, hover LQR/MPC, EKF, boulder capture (MuJoCo)
-- [x] Step 6 — impact physics on the real shape (momentum, spin, ejecta) + DART validation; multi-core execution
-- [x] Step 7 — gravity-tractor tow, B-plane trim guidance, nonlinear verification; the Sun around the barycenter
-- [x] Mission goal change — 2135 keyhole → 2182 impact scenario, DART opportunities and recommendations,
-      DART orbit raising and point of contact, sequential DART → gravity tractor, multi-view UI
-- [x] Fixes and features (2026-10-17) — display interpolation, slow motion from 1,000 km, end of the tow with
-      boulder release, tractor status strip / launch window / warm start, earliest launch date, minimum impact
-      speed, the real star sky with constellations, the 2182 Earth impact page and program
-- [ ] Step 8 — visual polish, record/replay movie, report figures

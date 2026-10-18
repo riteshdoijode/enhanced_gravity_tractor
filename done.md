@@ -611,7 +611,7 @@ You wanted to share the project with a friend on a Windows PC so they can study 
 
 ## 5. Validation and figures
 
-**Tests: 131** (`uv run pytest`, 6 parallel workers, several minutes). TESTS_RESULT
+**Tests: 131** (`uv run pytest`, 6 parallel workers, several minutes). All 131 passed on 2026-10-18 (5 min 58 s).
 
 | Test file | Count |
 |---|---|
