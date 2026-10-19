@@ -39,10 +39,128 @@ GALACTIC_SLOW = 50.0  # display option: the Galactic motion slowed x1/50 so the 
 PATH_YEARS = 4332.6 / 365.25  # traced paths: one orbit of Jupiter behind and ahead
 PATH_POINTS = 1500  # per path (~30 per orbit of Mercury)
 SIDE_DISTANCE = 11.0  # AU: the side view frames the inner planets (scroll out for Jupiter)
+SUN_RADIUS = 0.045  # AU: the drawn Sun (~10x its true 0.00465 AU, so it shows)
+HALO_RADII = 6.0  # the glow's half-width in drawn solar radii (inside Mercury's orbit, perihelion 6.8)
+MIN_HALO_PX = 34.0  # ... and never narrower on screen: zoomed out, the Sun stays a glowing star
+
+# The photosphere: the texture's granulation on a white-hot disk, darker and redder toward the limb. Eddington's
+# grey atmosphere gives I(mu)/I(1) = (2 + 3 mu)/5 = 1 - 0.6 (1 - mu), mu the cosine between the surface normal and
+# the line of sight; the darkening is stronger in blue light than in red, so the limb also turns orange.
+PHOTOSPHERE_FS = """//VTK::TCoord::Impl
+  {
+    float mu = clamp(dot(normalize(normalVCVSOutput), normalize(-vertexVCVSOutput.xyz)), 0.0, 1.0);
+    vec3 limb = vec3(1.0) - vec3(0.40, 0.58, 0.80) * (1.0 - mu);
+    float grain = dot(gl_FragData[0].rgb, vec3(0.299, 0.587, 0.114));
+    vec3 hot = mix(vec3(1.0, 0.84, 0.58), vec3(1.0, 0.96, 0.85), sqrt(mu));
+    gl_FragData[0].rgb = clamp(hot * (0.80 + 0.32 * grain) * limb, 0.0, 1.0);
+  }
+"""
 
 
 def ecl(P):
     return (EQ_TO_ECL @ np.atleast_2d(P).T).T / AU
+
+
+def _glow_image(n=512):
+    """RGBA image of the Sun's glow (rows and columns span the quad, -1..1): just outside the limb about as bright
+    as the darkened limb itself (no dark rim between them), then the inner glow fading within a few tenths of a
+    radius and the wide glare (~r^-1.2), yellow to orange, tapered to nothing at the quad's edge. Inside the disk:
+    white-hot, easing to the limb's value over its outer 15 % (the Sun covers it up close, without the core showing
+    between the sphere's facets; far away the Sun shrinks to this bright core)."""
+    x = (np.arange(n) + 0.5) / n * 2.0 - 1.0
+    rho = np.hypot(*np.meshgrid(x, x))
+    r = rho * HALO_RADII  # drawn solar radii
+    inner = np.exp(-(np.maximum(r, 1.0) - 1.0) / 0.3)
+    outer = np.maximum(r, 1.0) ** -1.2
+    edge = np.clip((1.0 - rho) / 0.5, 0.0, 1.0)
+    alpha = np.clip(0.32 * inner + 0.30 * outer, 0.0, 1.0) * edge * edge * (3.0 - 2.0 * edge)
+    w = np.clip(inner / (inner + 0.5 * outer), 0.0, 1.0)[..., None]
+    orange, yellow = np.array([1.0, 0.56, 0.20]), np.array([1.0, 0.80, 0.52])
+    rgb = orange + w * (yellow - orange)
+    core = np.clip((1.0 - r) / 0.15, 0.0, 1.0)  # 0 at the limb, 1 inside 0.85 radii
+    core = core * core * (3.0 - 2.0 * core)
+    rgb += core[..., None] * (np.array([1.0, 0.97, 0.90]) - rgb)
+    alpha += core * (1.0 - alpha)
+    return (np.dstack([rgb, alpha]) * 255).round().astype(np.uint8)
+
+
+class _SunGlow:
+    """The Sun's glow: a camera-facing quad in a renderer of its own, in layer 1 of the view's render window, between
+    the sky (layer 0, app/scenes/sky.py) and the scene (moved up to layer 2). The scene keeps the colour buffer and
+    clears only the depth, so the Sun, the planets, the orbits and the labels are all drawn over the glow. Before every
+    render the glow's camera copies the view's, and the quad turns to face it; its size follows the drawn Sun but
+    never drops below MIN_HALO_PX on screen."""
+
+    def __init__(self, plotter):
+        import vtk
+        from vtk.util.numpy_support import numpy_to_vtk
+
+        self.pl = plotter
+        self.center = np.zeros(3)
+        self.ren = vtk.vtkRenderer()
+        self.ren.InteractiveOff()
+        img = _glow_image()
+        data = vtk.vtkImageData()
+        data.SetDimensions(img.shape[1], img.shape[0], 1)
+        arr = numpy_to_vtk(np.ascontiguousarray(img.reshape(-1, 4)), deep=True)
+        arr.SetName("rgba")
+        data.GetPointData().SetScalars(arr)
+        tex = vtk.vtkTexture()
+        tex.SetInputData(data)
+        tex.InterpolateOn()
+        tex.MipmapOn()
+        tex.EdgeClampOn()
+        quad = vtk.vtkPlaneSource()
+        quad.SetOrigin(-1.0, -1.0, 0.0)
+        quad.SetPoint1(1.0, -1.0, 0.0)
+        quad.SetPoint2(-1.0, 1.0, 0.0)
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(quad.GetOutputPort())
+        mapper.ScalarVisibilityOff()
+        self.actor = vtk.vtkActor()
+        self.actor.SetMapper(mapper)
+        self.actor.SetTexture(tex)
+        self.actor.GetProperty().LightingOff()
+        self.actor.PickableOff()
+        self.ren.AddActor(self.actor)
+        self._matrix = vtk.vtkMatrix4x4()
+        self.actor.SetUserMatrix(self._matrix)
+        rw = plotter.ren_win
+        renderers = [rw.GetRenderers().GetItemAsObject(i) for i in range(rw.GetRenderers().GetNumberOfItems())]
+        rw.SetNumberOfLayers(rw.GetNumberOfLayers() + 1)
+        for r in renderers:  # everything above the sky moves up one layer
+            if r.GetLayer() >= 1:
+                r.SetLayer(r.GetLayer() + 1)
+        self.ren.SetLayer(1)
+        rw.AddRenderer(self.ren)
+        self.ren.SetViewport(*plotter.renderer.GetViewport())
+        self._obs = rw.AddObserver("StartEvent", lambda *a: self.sync())
+
+    def sync(self):
+        cam = self.pl.renderer.GetActiveCamera()
+        self.ren.GetActiveCamera().DeepCopy(cam)
+        self.ren.SetViewport(*self.pl.renderer.GetViewport())
+        p = np.array(cam.GetPosition())
+        dop = np.array(cam.GetDirectionOfProjection())
+        d = float((self.center - p) @ dop)  # the Sun's depth in front of the camera
+        parallel = bool(cam.GetParallelProjection())
+        right = np.cross(dop, cam.GetViewUp())
+        n = np.linalg.norm(right)
+        shown = bool(np.isfinite(d) and n > 0 and (d > 0.0 or parallel))
+        self.actor.SetVisibility(shown)
+        if not shown:
+            return
+        right /= n
+        up = np.cross(right, dop)
+        h = max(self.pl.renderer.GetSize()[1], 1)
+        per_px = (2.0 * cam.GetParallelScale() if parallel else 2.0 * d * np.tan(np.radians(cam.GetViewAngle()) / 2.0)) / h
+        s = max(HALO_RADII * SUN_RADIUS, MIN_HALO_PX * per_px)
+        for i, col in enumerate((s * right, s * up, -dop)):
+            for j in range(3):
+                self._matrix.SetElement(j, i, col[j])
+        for j in range(3):
+            self._matrix.SetElement(j, 3, self.center[j])
+        self._matrix.Modified()
 
 
 class SolarScene(SceneBase):
@@ -61,6 +179,7 @@ class SolarScene(SceneBase):
         self.galactic = None  # core/galaxy.solar_motion() while the Galactic side view is on
         self.galactic_slow = 1.0  # display slow-down of the Galactic motion (1 = true speed)
         self._paths_t = None
+        self._glow = _SunGlow(plotter)
         self.build()
         for event in ("LeftButtonPressEvent", "MiddleButtonPressEvent", "RightButtonPressEvent",
                       "MouseWheelForwardEvent", "MouseWheelBackwardEvent"):
@@ -74,8 +193,10 @@ class SolarScene(SceneBase):
         light.cone_angle = 180.0  # point light at the Sun
         self.pl.add_light(light)
         self._sun_light_actor = light
-        self._a["sun"] = self.pl.add_mesh(planets.load_planet(radius=0.045), texture=self.tex["sun"], ambient=1.0,
+        self._a["sun"] = self.pl.add_mesh(planets.load_planet(radius=SUN_RADIUS), texture=self.tex["sun"], ambient=1.0,
                                           diffuse=0.0, specular=0.0, name="sun", render=False)
+        self._a["sun"].GetShaderProperty().AddFragmentShaderReplacement("//VTK::TCoord::Impl", True, PHOTOSPHERE_FS,
+                                                                        False)
         self.marker("ssb", "#ffffff", 7)
         self._sun_trail_t = None
         t0 = self.eph.span("earth")[0]
@@ -289,6 +410,7 @@ class SolarScene(SceneBase):
             self.move_marker(n, pos[n])
         sun = pos["sun"] * self.sun_wobble
         self._a["sun"].user_matrix = pose(p=sun)
+        self._glow.center = sun
         self._sun_light_actor.position = tuple(sun)
         self.move_marker("ssb", np.zeros(3))
         if self._sun_trail_t is None or abs(t - self._sun_trail_t) > 30 * DAY:
